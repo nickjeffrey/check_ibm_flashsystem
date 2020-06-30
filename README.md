@@ -75,10 +75,10 @@ g) Select the temp file you created earlier.
 h) Click the Create button  
    
 You will need to manually ssh from the nagios server to each storage system to update the known_hosts file on the nagios server.  
-    $ ssh admin@10.10.8.191
-    RSA key fingerprint is ea:a1:05:58:8d:4e:4e:c4:82:db:cf:87:75:a6:7c:7f.
-    Are you sure you want to continue connecting (yes/no)? yes
-    Warning: Permanently added '10.10.8.191' (RSA) to the list of known hosts.
+    $ ssh admin@10.10.8.191  
+    RSA key fingerprint is ea:a1:05:58:8d:4e:4e:c4:82:db:cf:87:75:a6:7c:7f.  
+    Are you sure you want to continue connecting (yes/no)? yes  
+    Warning: Permanently added '10.10.8.191' (RSA) to the list of known hosts.  
 
    
 
