@@ -56,6 +56,7 @@ It is assumed that SSH key pairs have been created between the nagios server and
 SETUP SSH KEY PAIR AUTHENTICATION
 ---------------------------------
 If the nagios userid on the nagios server does not already have an SSH key pair, please create with:  
+
     su - nagios
     ssh-keygen -t rsa
  
@@ -111,6 +112,7 @@ If using NRPE, you will also need a section defining the NRPE command in the /us
 
 This script can take several minutes to run, which can potentially cause timeouts in nagios.  We work around this by scheduling a cron job to run every 15 minutes.
 Schedule this script to run every 15 minutes from the nagios user crontab, which will update a file at `/tmp/nagios.check_ibm_flashsystem.$hostname.tmp`  
+
 When this script runs as the low-privileged nagios user, the script will read the contents of `/tmp/nagios.check_ibm_flashsystem.$hostname.tmp`  
 Create cron entries in the nagios user crontab similar to the following:  
 
