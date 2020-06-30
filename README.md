@@ -56,11 +56,9 @@ nagios check for IBM SVC / Storwize / Spectrum Virtualize / FlashSystem storage
  SETUP SSH KEY PAIR AUTHENTICATION
  ---------------------------------
    If the nagios userid on the nagios server does not already have an SSH key pair, please create with: 
-   
-         ```
          su - nagios
          ssh-keygen -t rsa
-         ```
+
    
    Copy the contents of $HOME/.ssh/id_rsa.pub to a temporary file on your desktop.  This file will be used to upload the SSH public key to the storage system via a web browser.
    
