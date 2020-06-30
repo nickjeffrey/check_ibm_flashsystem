@@ -109,7 +109,7 @@ This assumes that you already have ssh key pairs configured.
            }
 
 If using NRPE, you will also need a section defining the NRPE command in the /usr/local/nagios/nrpe.cfg file that looks like this:  
-    command[check_ibm_flashsystem]=/usr/local/nagios/libexec/check_ibm_flashsystem
+    `command[check_ibm_flashsystem]=/usr/local/nagios/libexec/check_ibm_flashsystem`
 
 This script can take several minutes to run, which can potentially cause timeouts in nagios.  We work around this by scheduling a cron job to run every 15 minutes.
 Schedule this script to run every 15 minutes from the nagios user crontab, which will update a file at `/tmp/nagios.check_ibm_flashsystem.$hostname.tmp`  
