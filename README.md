@@ -113,6 +113,7 @@ This script can take several minutes to run, which can potentially cause timeout
 Schedule this script to run every 15 minutes from the nagios user crontab, which will update a file at `/tmp/nagios.check_ibm_flashsystem.$hostname.tmp`  
 When this script runs as the low-privileged nagios user, the script will read the contents of `/tmp/nagios.check_ibm_flashsystem.$hostname.tmp`  
 Create cron entries in the nagios user crontab similar to the following:  
+
     1,16,31,46 * * * * /usr/local/nagios/libexec/check_ibm_flashsystem v7000prod  1>/dev/null 2>/dev/null
     1,16,31,46 * * * * /usr/local/nagios/libexec/check_ibm_flashsystem v7000dev   1>/dev/null 2>/dev/null
     1,16,31,46 * * * * /usr/local/nagios/libexec/check_ibm_flashsystem svc01      1>/dev/null 2>/dev/null
