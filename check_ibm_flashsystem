@@ -1,0 +1,2027 @@
+#!/usr/bin/perl -sW
+
+
+
+# This is a nagios script will SSH into an IBM SVC/V7000 and confirm the following:
+#     - any existing metro mirrors or global mirrors are in sync
+#     - CPU not maxed out 
+#     - Cache memory not maxed out (not yet implemented)
+#     - name resolution exists for the SVC 
+#     - time synchronization is in place
+#     - generate an HTML report that shows disk mirror relationships
+
+
+
+
+# OUSTANDING TASKS
+# ----------------
+#   - see if you can look at bandwidth used by mirroring (might be in "svcinfo lssystemstats in code 6.3 or later)
+#   - see if you can come up with a check for cache utilization (ie is the cache being overrun)
+
+
+
+
+
+# CHANGE LOG
+# ----------
+#  2011/03/04	Nick Jeffrey	Script created
+#  2011/04/25	Nick Jeffrey	generate HTML report for viewing mirror relationships from local web server
+#  2011/04/25	Nick Jeffrey	generate HTML report for viewing vdisks from local web server
+#  2012/07/01	Nick Jeffrey	add check_cpu_load subroutine
+#  2012/07/01	Nick Jeffrey	add check_controllers subroutine
+#  2012/07/01	Nick Jeffrey	add check_mdisks subroutine
+#  2012/07/01	Nick Jeffrey	add check_vdisks subroutine
+#  2012/11/26	Nick Jeffrey	add functionality to automatically restart stopped remote copy mirrors and consistency groups
+#  2012/11/26	Nick Jeffrey	enhancements to check_cpu_load subroutine
+#  2012/11/26	Nick Jeffrey	rename check_cpu_load subroutine to check_perf_stats, and add checks for latency as well
+#  2015/04/17	Nick Jeffrey	add check_slots subroutine
+#  2015/04/28	Nick Jeffrey	fix bug in check_error_logs subroutine - split command was splitting on spaces instead of newlines
+#  2015/04/30	Nick Jeffrey	add check_physical_disks subroutine to look for offline physical disk drives
+#  2015/07/24   Nick Jeffrey    Remove dependency on Net::SSH::Perl module - does not install on AIX
+#  2015/09/01   Nick Jeffrey    This check times out on storage systems with lots of disks to check - execute via cron and write to temporary files
+#  2015/09/01   Nick Jeffrey    Add print_to_outputfile subroutine
+#  2015/09/08   Nick Jeffrey    Get rid of $out,$err,$exit variables  - leftovers from Net::SSH::Perl module
+#  2015/09/14   Nick Jeffrey    Bug fix - missing open statement before while loop to check fault_LED status in check_slots subroutine
+#  2016/06/24   Nick Jeffrey    Do not alert on global mirrors in state consistent_copying or consistent_stopped
+#  2016/07/01   Nick Jeffrey    Add check_firmware subroutine
+#  2016/07/25   Nick Jeffrey    Bug fix in check_firmware subroutine - was not calling print_to_outputfile subroutine
+#  2016/08/22   Nick Jeffrey    Add send_email subroutine in case this script is being called from cron instead of from nagios
+#  2016/08/23   Nick Jeffrey    Move check_error_logs subroutine to bottom to ensure all the other subroutines have a chance to run even if errors exist in the log
+#  2016/08/23   Nick Jeffrey    Move check_perf_stats subroutine to bottom to ensure all the other subroutines have a chance to run even if errors exist in the log
+#  2016/09/13   Nick Jeffrey    add check_email_server, check_ntp_server, verify_credentials subroutines
+#  2016/09/20   Nick Jeffrey    Remove redundant checks from error logs for lost connection to remote system
+#  2020/06/29	Nick Jeffrey	Add GetOpt::Long for --verbose switch
+#  2020/06/29	Nick Jeffrey	Script renamed from check_svc to check_ibm_flashsystem due to IBM rebranding storage product lines
+
+
+
+# NOTES
+# -----
+#
+# You must have passwordless SSH logins configured to the SVC cluster
+#
+# This script has been tested against SVC version 6.x and 7.x.  
+# Other SVC code levels are expected to work, but have not been tested.
+# 
+# You will need to create the $mirror_report file as root with these commands:
+#   touch /var/www/html/svc_mirror_report.$host.html
+#   chown nagios /var/www/html/svc_mirror_report.$host.html
+# 
+# You will need to create the $mirror_report file as root with these commands:
+#   touch /var/www/html/svc_vdisk_report.$host.html
+#   chown nagios /var/www/html/svc_vdisk_report.$host.html
+#
+# Since this script can take up to 10 minutes to run, it often times out when run via nagios.
+# Schedule this script to run every 15 minutes via cron, then have nagios just read the output file from the cron job.
+# Create cron entries in the nagios user crontab similar to the following:  (one for each SVC/V7000 in your environment)
+#   1,16,31,46 * * * * /usr/local/nagios/libexec/check_ibm_flashsystem prodsvc   > /dev/null 2>&1  #run via cron every 15 minutes in case the script times out in nagios
+#   2,17,32,47 * * * * /usr/local/nagios/libexec/check_ibm_flashsystem prodv7000 > /dev/null 2>&1  #run via cron every 15 minutes in case the script times out in nagios
+
+
+
+
+
+# PREREQUISITES
+# -------------
+#   1) It is assumed that this script is run on the nagios server as the "nagios" userid
+#
+#   2) You will need to setup preshared ssh key pairs between the nagios server and the SVC cluster.
+#      Note that the SVC cluster expects the keys in rsa format.
+#	  On the nagios server
+#         --------------------
+#         a) Create ssh key pair with:
+#               su - nagios
+#               ssh-keygen -t rsa
+#         b) Copy the contents of $HOME/.ssh/id_rsa.pub to a temporary file on your desktop.  This file
+#            will be used to upload the SSH public key to the SVC cluster via a web browser.
+# 
+#         
+#         On the SVC cluster (applicable to SVC version 6.x - other version have different procedures)
+#         ------------------------------------------------------------------------------------------
+#         a) Point your web browser at the SVC management interface.  Login as superuser (or equivalent).
+#         b) Click User Management, Users, New user 
+#         c) Set the username to: nagios
+#         d) Set the Authentication mode to: local
+#         e) Set the User Group to: monitor   (this is a read-only account) (set to administrator group if you want to restart stopped mirrors)
+#         f) Click the Browse button to find the SSH public key for the nagios account.  
+#         g) Select the temp file you created earlier.
+#         h) Click the Create button
+#
+#
+#   3) You will need to manually ssh from the nagios server to each SVC cluster to update 
+#      the known_hosts file on the nagios server.  Example shown below:
+#         $ ssh admin@10.10.8.191
+#         RSA key fingerprint is ea:a1:05:58:8d:4e:4e:c4:82:db:cf:87:75:a6:7c:7f.
+#         Are you sure you want to continue connecting (yes/no)? yes
+#         Warning: Permanently added '10.10.8.191' (RSA) to the list of known hosts.
+#
+#
+#
+#   4) You will need a section similar to the following in the commands.cfg file on the nagios server.
+#      # ---------------------------------------------------------------------------
+#      # 'check_ibm_flashsystem' command definition
+#      define command {
+#             command_name    check_ibm_flashsystem
+#             command_line    $USER1$/check_ibm_flashsystem $HOSTADDRESS$ 
+#             }
+#
+#
+#
+#   5) You will need a section similar to the following in the services.cfg file on the nagios server.
+#      define service {
+#              use                             generic-24x7-service
+#              host_name                       svc1.example.com
+#              service_description             IBM FlashSystem checks
+#              check_command                   check_ibm_flashsystem
+#              }
+
+
+
+
+#
+#
+# TROUBLESHOOTING
+# ---------------
+# 1) Confirm you can ssh from the nagios server to each SVC without a password
+# 2) Confirm there are no firewalls preventing ssh logins from the nagios server to the SVC
+# 3) If you get an error message like the following:
+#       Return code of 13 is out of bounds
+#    It means that the nagios process mis-reads the $HOME environment variable as /root instead of /home/nagios
+#    You can fix this by manually setting $ENV{'HOME'} = '/home/nagios';  
+#
+# 4) If you get frequent timeouts when using this script, it might be because /dev/random is not generating sufficiently random data for the Net::SSH::Perl module.  
+#    NOTE: This script discontinued use of Net::SSH::Perl, so this should no longer be an issue.
+#    This can happen because RHEL 6.x kernels are tickless, so /dev/random doesn't generate sufficiently random data.
+#    You might get this message:
+#    Connection closed by remote host. at /usr/share/perl5/vendor_perl/Net/SSH/Perl/AuthMgr.pm line 143
+#      If you are on RHEL/CentOS Linux, try this:
+#        yum install rng-tools
+#        perl -p -i -e 's/^EXTRAOPTIONS/#EXTRAOPTIONS/' /etc/sysconfig/rngd
+#        echo EXTRAOPTIONS="-r /dev/urandom" >> /etc/sysconfig/rngd
+#        chkconfig rngd on
+#        service rngd start# 
+#
+# 5) If you get this error message: CMMVC6253E The task has failed because the user's role is not authorized to submit the command.
+#    it probably means you have $restart_stoped_mirrors = "yes", but the nagios userid on the SVC does not have administrator rights.
+
+
+
+
+#
+# Usage:       /usr/local/nagios/libexec/check_ibm_flashsystem hostname 
+#
+# Dependencies: working ssh key pairs for password-less logins to storage system
+
+
+
+
+#
+#
+use strict;							#enforce good coding practices
+use Getopt::Long;                       			#allow --long-switches to be used as parameters
+
+my ($host,$ssh,$ssh_status,$ssh_userid);
+my ($verbose,$outputfile,$output_message);
+my ($nslookup,$nslookup_status,$cmd);
+my ($ping,$ping_status);
+my ($smtp_ipaddr,$smtp_port,$ntp_ipaddr);
+my ($opt_h,$opt_v);
+my ($OK,$WARN,$CRITICAL,$UNKNOWN,$CHECK_NAME);
+my (%nodes,%clusters,%mirrors,%consistencygroups,%vdisks,%controllers);
+my ($metro_mirror_count,$global_mirror_count,$consistency_group_count,$key);
+my ($config_node,$nodecount,@lines,$cur_date,$mirror_report,$vdisk_report,$code_level,$cpu_pc);
+my ($num_vdisks,$num_pdisks,$num_mdisks,$restart_stopped_mirrors,$write_cache_pc,$total_cache_pc);
+my ($vdisk_r_ms,$vdisk_w_ms,%slots,$num_slots,$num_external_controllers);
+my ($epoch,$dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks);
+my ($send_email,$email_to,$email_subject);
+#
+#declare variables
+$host                     = "";					#initialize variable
+$ssh                      = "/usr/bin/ssh";			#location of ssh binary
+$ssh_userid               = "nagios";				#ssh userid on the SVC
+$nslookup                 = "/usr/bin/nslookup";		#location of binary on nagios server
+$nslookup_status          = "";					#flag for checking to see if nslookup test succeeds
+$ping                     = "/bin/ping";                        #location of binary on nagios server
+$ping_status              = "";                                 #flag for checking to see if ping     test succeeds
+$verbose                  = "no";				#for debugging (yes=show more print output) 
+$CHECK_NAME               = "SVC checks"; 			#name of nagios check
+$ssh_status               = "";					#status of ssh    daemon
+$metro_mirror_count       = 0;					#number of metro mirrors
+$global_mirror_count      = 0;					#number of global mirrors
+$consistency_group_count  = 0;					#number of global mirrors
+$cur_date                 = `date` ; chomp $cur_date;		#get the current data to be used in the HTML report
+$mirror_report            = "";					#location of HTML report on mirror relationships - to be updated after we learn the $host 
+$vdisk_report             = "";					#location of HTML report on vdisks - to be updated after we learn the $host
+$code_level               = "";					#the version of code running on the SVC / V7000
+$cpu_pc                   = "unknown";				#CPU percent utilized on SVC cluster (averaged across all nodes)
+$num_vdisks               = "0";				#number of vdisks (virtual disks, aka LUNs, aka volumes)
+$num_mdisks               = "0";				#number of mdisks (managed disks, aka raid arrays)
+$num_pdisks               = "0";				#number of internal pdisks (physical disk drives) - Storwize only, does not apply to SVC
+$num_external_controllers = 0;					#number of external storage subsystems virtualized by the SVC/V7000
+$restart_stopped_mirrors  = "yes";				#yes/no flag to restart mirrors if they stop
+$send_email               = "no"; 				#yes/no flag.  Choose no if script runs from nagios, choose yes if running from cron.
+$email_to                 = "itsupport\@example.com"; 		#comma separated list of email recipients
+$email_subject            = "SVC alert"; 			#subject of email
+
+#
+# Nagios return codes
+#
+$OK=            0;                            		  	#this script returns a value to nagios for processing
+$WARN=          1;                          		    	#this script returns a value to nagios for processing
+$CRITICAL=      2;                              		#this script returns a value to nagios for processing
+$UNKNOWN=       3;                              		#this script returns a value to nagios for processing
+
+
+
+
+sub get_options {
+   #
+   # this gets the command line parameters provided by the users
+   #
+   print "Running get_options subroutine \n" if ($verbose eq "yes");
+   Getopt::Long::Configure('bundling');
+   GetOptions(
+      "h"   => \$opt_h, "help"        => \$opt_h,
+      "v"   => \$opt_v, "verbose"     => \$opt_v,
+   );
+   #
+   # If the user supplied the -h or --help switch, give them some help.
+   #
+   if( defined( $opt_h ) ) {
+      print "Use this syntax \n";
+      print "   $0 \n";
+      print "   $0 --verbose     (increase output for debugging \n";
+      exit $CRITICAL;				#exit script
+   }
+   #
+   # If the user supplied the --verbose switch, increase output verbosity
+   #
+   if( defined( $opt_v ) ) {
+      $verbose = "yes";
+   } else {
+      $verbose = "no";
+   }
+}                       #end of subroutine
+
+
+
+sub sanity_checks {
+   # 
+   print "running sanity_checks subroutine \n" if ($verbose eq "yes");
+   # 
+   # confirm user specified a command line parameter for the hostname
+   #  
+   if( ! defined( $ARGV[0] ) ) {
+      print "$CHECK_NAME CRITICAL  - no hostname supplied.  USAGE: $0 SVC_host_name \n";
+      exit $CRITICAL;
+   }						#end of if block
+   if( defined( $ARGV[0] ) ) {
+      $host = $ARGV[0];				#assign meaningful variable name
+   }						#end of if block
+   #
+   # update the name of the $vdisk_report file to include the SVC hostname
+   $vdisk_report = "/var/www/html/svc_vdisk_report_$host.html";
+   #
+   # update the name of the $mirror_report file to include the SVC hostname
+   $mirror_report = "/var/www/html/svc_mirror_report_$host.html";
+   #
+   # update the contents of the $email_subject variable to include the SVC hostname
+   $email_subject = "V7000 alert on $host";
+   #
+   # confirm ssh exists
+   if ( ! -f "$ssh" ) {
+      print "$CHECK_NAME WARN: Cannot find $ssh \n";
+      exit $WARN;				#exit script
+   }						#end of if block
+   if ( ! -x "$ssh" ) {
+      print "$CHECK_NAME WARN: $ssh is not executable by the current user\n";
+      exit $WARN;				#exit script
+   }						#end of if block
+   #
+   # confirm ping exists
+   $ping = "/bin/ping" if (-f "/bin/ping");     #location on Linux
+   $ping = "/etc/ping" if (-f "/etc/ping");     #location on AIX
+   if ( ! -f "$ping" ) {
+      print "ERROR: Cannot find $ping \n";
+      exit;                                     #exit script
+   }                                            #end of if block
+   if ( ! -x "$ping" ) {
+      print "ERROR: $ping is not executable by the current user\n";
+      exit;                                     #exit script
+   }                                            #end of if block
+   #
+   # confirm nslookup exists
+   if ( ! -f "$nslookup" ) {
+      print "$CHECK_NAME WARN: Cannot find $nslookup \n";
+      exit $WARN;					#exit script
+   }						#end of if block
+   if ( ! -x "$nslookup" ) {
+      print "$CHECK_NAME WARN: $nslookup is not executable by the current user\n";
+      exit $WARN;				#exit script
+   }						#end of if block
+   #
+   # confirm $mirror_report file exists
+   if ( ! -f "$mirror_report" ) {
+      open IN, "touch $mirror_report 2>&1|" ;	#create the file if it does not already exist
+      close IN;
+   }						#end of if block
+   if ( ! -f "$mirror_report" ) {
+      print "$CHECK_NAME WARN: $mirror_report file could not be created \n";
+      exit $WARN;				#exit script
+   }						#end of if block
+   #
+   # confirm $mirror_report file is writeable
+   if ( ! -w "$mirror_report" ) {
+      print "$CHECK_NAME WARN: $mirror_report file is not writeable by the current user\n";
+      exit $WARN;				#exit script
+   }						#end of if block
+   #
+   # confirm $vdisk_report file exists
+   if ( ! -f "$vdisk_report" ) {
+      open IN, "touch $vdisk_report 2>&1|" ;	#create the file if it does not already exist
+      close IN;
+   }						#end of if block
+   if ( ! -f "$vdisk_report" ) {
+      print "$CHECK_NAME WARN: $vdisk_report file could not be created \n";
+      exit $WARN;				#exit script
+   }						#end of if block
+   #
+   # confirm $vdisk_report file is writeable
+   if ( ! -w "$vdisk_report" ) {
+      print "$CHECK_NAME WARN: $vdisk_report file is not writeable by the current user\n";
+      exit $WARN;				#exit script
+   }						#end of if block
+}						#end of subroutine
+
+
+
+
+
+sub send_email_alert {
+   #
+   print "running send_email_alert subroutine \n" if ($verbose eq "yes");
+   #
+   # This subroutine only runs if the $send_email variable is set to "yes".
+   # This subroutine is used to send email directly from the script, rather than letting nagios handle the alerts.
+   # You must set $send_email="yes" if this script is being run from cron instead of from nagios
+   #
+   return unless ( $send_email eq "yes" );					#exit from subroutine 
+   #
+   $cmd = "echo \"$output_message\" \| mail -s \"$email_subject\" $email_to";		#define command to be run
+   print "   running $cmd \n" if ($verbose eq "yes");
+   open(MAIL,"$cmd |") or die "$!\n";
+   close MAIL;									#close filehandle
+}
+
+
+
+
+sub check_name_resolution {
+   #
+   print "running check_name_resolution subroutine \n" if ($verbose eq "yes");
+   #
+   # confirm valid name resolution exists for $host
+   #
+   if( ! open( NSLOOKUP, "$nslookup $host 2>&1|" ) ) {
+      warn "WARNING: nslookup $host failed: $!\n";
+      return 0;
+   }
+   while (<NSLOOKUP>) {                        					#read a line from STDIN
+      if (/failed/) {								#look for error message from nslookup
+         $nslookup_status = "failed";						#set flag value for $nslookup variable
+      }										#end of if block
+      if (/SERVFAIL/) {								#look for error message from nslookup
+         $nslookup_status = "failed";						#set flag value for $nslookup variable
+      }										#end of if block
+   }										#end of while loop
+   close NSLOOKUP;								#close filehandle
+   if ( $nslookup_status eq "failed" ) {					#check for flag value
+      print "$CHECK_NAME CRITICAL: no name resolution for $host - please add $host to DNS \n";
+      exit $CRITICAL; 								#exit script
+   }										#end of if block
+}
+
+
+
+
+sub ping_remote_host {
+   #
+   print "running ping_remote_host subroutine \n" if ($verbose eq "yes");
+   #
+   # ping remote hostname
+   #
+   $ping_status = "";                                                           #initialize variable
+   if( ! open( PING, "$ping -c 1 $host |" ) ) {
+      print "$CHECK_NAME CRITICAL - Could not ping $host because: $!\n";
+      exit $CRITICAL;								#exit script
+   } 										#end of if block
+   while (<PING>) {                                                             #read a line from STDIN
+      if ( (/100% packet loss/) || (/100% loss/) ) {;                        	#look for timeout message 
+         $ping_status = "failed";                              
+         print "   did not receive ping reply from $host \n" if ($verbose eq "yes");
+      } 									#end of if block
+      if ( (/ 0% packet loss/) || (/ 0% loss/) ) {;                        	#look for timeout message 
+         $ping_status = "success";                              
+         print "   received ping reply from $host \n" if ($verbose eq "yes");
+      } 									#end of if block
+   }                                                                            #end of while loop
+   close PING;                                                                  #close filehandle
+   if ( $ping_status eq "failed" ) {                                            #check for flag value
+      print "$CHECK_NAME CRITICAL - No ping reply from $host $!\n";
+      exit $CRITICAL;								#exit script
+   }                                                                            #end of if block
+}										#end of subroutine
+
+
+
+
+sub check_for_output_file {
+   #
+   # a cron job may have already created the output file that we need
+   #
+   print "running check_for_output_file subroutine \n" if ($verbose eq "yes");
+   #
+   unless ($host) {
+      print "$CHECK_NAME UNKNOWN - Could not determine hostname or IP address for host $host \n";
+      exit $UNKNOWN;
+   } 										#end of unless block
+   $outputfile = "/tmp/nagios.check_ibm_flashsystem.$host";            			#name of temporary file
+   print"   checking for existence of temporary file $outputfile \n" if ($verbose eq "yes");
+   #
+   # delete the output file if it is more than 15 minutes old
+   if ( -e "$outputfile" ) {                                            	#see if a cron job has already provided the info we need
+      $epoch = time(); 								#number of seconds since the epoch
+      ($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks) = stat($outputfile);
+      if ( ($epoch - $mtime) > (60 * 15) ) { 					#mtime is last file modification time in seconds since the epoch
+         print "   deleting obsolete file $outputfile \n" if ($verbose eq "yes");
+         unlink "$outputfile";               					#delete file if it is too old to be of any use
+         # confirm the file was deleted
+         if ( -e "$outputfile" ) {
+            print "$CHECK_NAME UNKNOWN - Could not delete temporary file $outputfile - please check file permissions \n";
+            exit $UNKNOWN;
+         }                                                              	#end of if block
+      }                                                                 	#end of if block
+   }                                                                    	#end of if block
+   #
+   if ( -e "$outputfile" ) {                                            	#see if a cron job has already provided the info we need
+      print "   found existing file $outputfile - using that for check output \n" if ($verbose eq "yes");
+      open (OUT,"$outputfile") or die "Cannot open $outputfile for reading $! \n";
+      while (<OUT>) {                                                   	#read a line from the text file
+         $output_message = $_  if ( $_ =~ /[a-zA-Z]/);                  	#get the content of the output file into a variable
+      }                                                                 	#end of while loop
+      close OUT;                                                        	#close filehandle
+      print $output_message;                                            	#print the content of the output file
+      exit $CRITICAL if ( $output_message =~ /CRITICAL/ );              	#exit script with appropriate return code
+      exit $WARN     if ( $output_message =~ /WARN/ );                  	#exit script with appropriate return code
+      exit $UNKNOWN  if ( $output_message =~ /UNKNOWN/ );               	#exit script with appropriate return code
+      exit $OK       if ( $output_message =~ /OK/ );                    	#exit script with appropriate return code
+      exit $UNKNOWN;   					                 	#only get this far if OK/WARN/CRITICAL/UNKNOWN was not found in the output file
+   }                                                                    	#end of if block
+}                                                                       	#end of subroutine
+
+
+
+
+
+sub print_to_outputfile {
+   #
+   print "running print_to_outputfile \n" if ($verbose eq "yes");
+   #
+   # This subroutine is called whenever an output message is printed, to confirm that the $outputfile exists
+   #
+   # confirm the output message exists
+   $output_message = "$CHECK_NAME UNKNOWN - could not parse response from storage system \n" unless ($output_message);
+   #
+   # confirm the $outputfile variable is defined
+   unless ($outputfile) {
+      print "$CHECK_NAME UNKNOWN - the \$outputfile variable is not defined.  This might be a script bug. \n"; 
+      exit $UNKNOWN;   					                 	#only get this far if OK/WARN/CRITICAL/UNKNOWN was not found in the output file
+   }  										#end of unless block
+   #
+   if ( ! -e "$outputfile" ) {							#only run this section if $outputfile does not already exist
+      print "   $outputfile not found - writing output message to $outputfile \n" if ($verbose eq "yes");
+      open (OUT,">$outputfile") or die "Cannot open $outputfile for writing: $! \n";
+      print OUT "$output_message";
+      close OUT; 								#close filehandle
+   } 										#end of if block
+}                                                              			#end of subroutine
+
+
+sub verify_credentials {
+   #
+   print "running verify_credentials subroutine \n" if ($verbose eq "yes");
+   #
+   # This subroutine just runs a simple command and confirms we get a valid response.
+   # If we do not get a valid response, assume the credentials are wrong.
+   # Command output should be similar to the following:
+   # nagios@pcced1mon01:/usr/local/nagios/libexec $ /usr/bin/ssh nagios@pcced1svc1 svcinfo lsuser
+   # id name      password ssh_key remote usergrp_id usergrp_name
+   # 0  superuser yes      yes     no     0          SecurityAdmin
+   # 2  nagios    yes      yes     no     1          Administrator
+   # 3  powerha   yes      yes     no     0          SecurityAdmin
+   # 5  backup    no       yes     no     1          Administrator
+   # 6  cacti     no       yes     no     4          Monitor
+   # 7  bwcontrol no       yes     no     1          Administrator
+   # 8  stor2rrd  no       yes     no     1          Administrator
+   #
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsuser -delim :";			#define command to be run
+   print "   running $cmd \n" if ($verbose eq "yes");
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      if ( /^id:name/ ) {							#confirm that we can see the header row in the command output
+         print "   credentials are ok \n" if ($verbose eq "yes");
+         return; 								#break out of subroutine
+      }										#end of if block
+   }
+   close SSH;
+   #
+   # If we get this far, it means we did not get valid command response.
+   $output_message = "$CHECK_NAME WARN - invalid credentials specified.  Please check the userid you are connecting as, and confirm SSH key pairs on the storage system.  \n";
+   print "$output_message";	#print output to screen
+   print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+   send_email_alert;		#call subroutine to send email alert
+   exit $WARN;
+}                                                              			#end of subroutine
+
+
+
+sub check_cluster_status {
+   #
+   # Confirm the SVC node cluster has no obvious configuration problems
+   #
+   print "running check_cluster_status \n" if ($verbose eq "yes");
+   #
+   # This command will generate multiple lines of ouput that look similar to the following:
+   #IBM_2145:svc1a:admin>svcinfo lscluster
+   #id name        UPS_serial_number WWNN             status IO_group_id IO_group_name config_node UPS_unique_id    hardware iscsi_name                                       iscsi_alias panel_name enclosure_id canister_id enclosure_serial_number
+   #1  svc1a 100007O052        500507680100B5B0 online 0           io_grp0       no          204077C0142 CF8      iqn.1986-03.com.ibm:2145.svc1a.svc1a    154883 
+   #2  svc1b 100007O055        500507680100B48E online 0           io_grp0       yes         204077C0145 CF8      iqn.1986-03.com.ibm:2145.svc1a.svc1b    154841 
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lscluster -delim :";			#define command to be run
+   print "   running $cmd \n" if ($verbose eq "yes");
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      next if ( /^id:name/ ); 							#skip header row
+      if ( /^([a-zA-Z0-9]+):/ ) {						#get the alphanumeric ID of each metro mirror relationship
+         $clusters{$1}{id}=$1;							#assign value to hash
+         print "   found SVC cluster $1 \n" if ($verbose eq "yes");   
+      }										#end of if blockA
+   }
+   close SSH;
+   #
+   # At this point, we have a hash with keys that contain the numeric ID of each node.
+   # We will now loop through each of those nodes and get more detailed information.
+   foreach $key (sort keys %clusters) {
+      # This will generate multiple lines of ouput that looks similar to the following:
+      #id:0000020060216B60
+      #name:svc1a
+      #location:local
+      #partnership:
+      #bandwidth:
+      #total_mdisk_capacity:3.9TB
+      #space_in_mdisk_grps:3.9TB
+      #space_allocated_to_vdisks:3.54TB
+      #total_free_space:373.4GB
+      #statistics_status:on
+      #statistics_frequency:5
+      #required_memory:0
+      #cluster_locale:en_US
+      #time_zone:519 US/Mountain
+      #code_level:6.1.0.3 (build 25.2.1012061000)
+      #FC_port_speed:2Gb
+      #console_IP:10.10.8.191:443
+      #id_alias:0000020060216B60
+      #gm_link_tolerance:300
+      #gm_inter_cluster_delay_simulation:0
+      #gm_intra_cluster_delay_simulation:0
+      #email_reply:
+      #email_contact:
+      #email_contact_primary:
+      #email_contact_alternate:
+      #email_contact_location:
+      #email_state:stopped
+      #inventory_mail_interval:0
+      #total_vdiskcopy_capacity:3.54TB
+      #total_used_capacity:3.54TB
+      #total_overallocation:90
+      #total_vdisk_capacity:3.54TB
+      #cluster_ntp_IP_address:10.10.8.144
+      #cluster_isns_IP_address:
+      #iscsi_auth_method:none
+      #iscsi_chap_secret:
+      #auth_service_configured:no
+      #auth_service_enabled:no
+      #auth_service_url:
+      #auth_service_user_name:
+      #auth_service_pwd_set:no
+      #auth_service_cert_set:no
+      #relationship_bandwidth_limit:25
+      #gm_max_host_delay:5
+      #tier:generic_ssd
+      #tier_capacity:0.00MB
+      #tier_free_capacity:0.00MB
+      #tier:generic_hdd
+      #tier_capacity:3.91TB
+      #tier_free_capacity:367.50GB
+      #email_contact2:
+      #email_contact2_primary:
+      #email_contact2_alternate:
+      #total_allocated_extent_capacity:3.55TB
+      #
+      #
+      $cmd = "$ssh $ssh_userid\@$host svcinfo lscluster -delim : $key";						#define command to be run
+      print "   running $cmd \n" if ($verbose eq "yes");
+      open(SSH,"$cmd |") or die "$!\n"; 									#open filehandle using command output
+      while (<SSH>) { 												#read a line from the filehandle
+         $clusters{$key}{name}=$1                    if ( /^name:([a-zA-Z0-9_\-]+)/ );				#assign value to hash
+         $clusters{$key}{location}=$1                if ( /^location:([a-zA-Z0-9_\-]+)/ );			#assign value to hash
+         $clusters{$key}{email_contact}=$1           if ( /^email_contact:([a-zA-Z0-9_\-]+)/ );			#assign value to hash
+         $clusters{$key}{email_reply}=$1             if ( /^email_reply:([a-zA-Z0-9_\-\@]+)/ );			#assign value to hash
+         $clusters{$key}{email_state}=$1             if ( /^email_state:([a-zA-Z0-9_\-]+)/ );			#assign value to hash
+         $clusters{$key}{cluster_ntp_IP_address}=$1  if ( /^cluster_ntp_IP_address:([0-9\.]+)/ );		#assign value to hash
+         $clusters{$key}{inventory_mail_interval}=$1 if ( /^inventory_mail_interval:([0-9]+)/ );		#assign value to hash
+         $clusters{$key}{code_level}=$1              if ( /^code_level:([0-9\.]+)/ );				#assign value to hash
+         next if ( /^id:name/ ); 										#skip header row
+      } 													#end of while loop
+      close SSH; 												#close filehandle
+      $code_level = $clusters{$key}{code_level} if defined ( $clusters{$key}{code_level} );			#put into a scalar variable we can use in the output
+   }														#end of foreach block
+   #
+   #
+   # loop through the hash values and alert if any problems with the SVC clusters are found
+   foreach $key (sort keys %clusters) {
+      #
+      next if ( $clusters{$key}{location} eq "remote" );							#skip SVC clusters that are connected via a relationship
+      #
+      unless ( $clusters{$key}{cluster_ntp_IP_address} ) {
+         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} is not configured to sync its time against an NTP server.  Login to the web interface and click Settings, Advanced, Date and Time.  \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $WARN;
+      }														#end of if block
+      unless ( $clusters{$key}{email_contact} ) {								#this is the name of the email contact
+         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email.  \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $WARN;
+      }														#end of if block
+      unless ( $clusters{$key}{email_reply} ) {									#this is the email address of the email contact
+         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email.  \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $WARN;
+      }														#end of if block
+      unless ( $clusters{$key}{email_state} eq "running" ) {							#this tells us if the email notifications are active
+         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email.  \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $WARN;
+      }														#end of if block
+      if ( $clusters{$key}{inventory_mail_interval} == 0 ) {							#this tells how frequently inventory details are emailed to IBM support
+         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} is not configured to send weekly inventory information to IBM support.  This means that IBM is unable to provide proactive notification of problems.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details.  \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $WARN;
+      }														#end of if block
+      if ( $clusters{$key}{inventory_mail_interval} > 30 ) {							#this tells how frequently inventory details are emailed to IBM support
+         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} sends inventory information to IBM support every $clusters{$key}{inventory_mail_interval} days.  That is a long time.  Please change the value to 7 days.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details, and a box to specify the number of days between reports.  \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $WARN;
+      }														#end of if block
+   }														#end of foreach loop
+}														#end of subroutine
+
+
+
+
+
+
+
+
+
+
+sub check_node_status {
+   #
+   # Check the status of the SVC nodes to confirm they are online
+   #
+   print "running check_node_status \n" if ($verbose eq "yes");
+   #
+   # Each SVC cluster will have a minumum of two nodes.  This subroutine validates that the nodes are online
+   #
+   #
+   # This command will generate multiple lines of ouput that look similar to the following:
+   #IBM_2145:svc1a:admin>svcinfo lsnode
+   #id name        UPS_serial_number WWNN             status IO_group_id IO_group_name config_node UPS_unique_id    hardware iscsi_name                                       iscsi_alias panel_name enclosure_id canister_id enclosure_serial_number
+   #1  svc1a 100007O052        500507680100B5B0 online 0           io_grp0       no          204077C0142 CF8      iqn.1986-03.com.ibm:2145.svc1a.svc1a          154883 
+   #2  svc1b 100007O055        500507680100B48E online 0           io_grp0       yes         204077C0145 CF8      iqn.1986-03.com.ibm:2145.svc1a.svc1b          154841 
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsnode -delim :";			#define command to be run
+   print "   running $cmd \n" if ($verbose eq "yes");
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      next if ( /^id:name/ ); 					#skip header row
+      if ( /^([0-9]+):/ ) {					#get the numeric ID of each metro mirror relationship
+         $nodes{$1}{id}=$1;					#assign value to hash
+         print "   found SVC node $1 \n" if ($verbose eq "yes");   
+      }								#end of if blockA
+   }								#end of while loop 
+   close SSH;
+   #
+   # At this point, we have a hash with keys that contain the numeric ID of each node.
+   # We will now loop through each of those nodes and get more detailed information.
+   foreach $key (sort keys %nodes) {
+      # This will generate multiple lines of ouput that looks similar to the following:
+      #id:1
+      #name:svc1a
+      #UPS_serial_number:100007O052
+      #WWNN:500507680100B5B0
+      #status:online
+      #IO_group_id:0
+      #IO_group_name:io_grp0
+      #partner_node_id:2
+      #partner_node_name:svc1b
+      #config_node:no
+      #UPS_unique_id:20400000077C0142
+      #port_id:500507680140B5B0
+      #port_status:active
+      #port_speed:8Gb
+      #port_id:500507680130B5B0
+      #port_status:active
+      #port_speed:8Gb
+      #port_id:500507680110B5B0
+      #port_status:active
+      #port_speed:4Gb
+      #port_id:500507680120B5B0
+      #port_status:active
+      #port_speed:8Gb
+      #hardware:CF8
+      #iscsi_name:iqn.1986-03.com.ibm:2145.svc1a.svc1a
+      #iscsi_alias:
+      #failover_active:no
+      #failover_name:svc1b
+      #failover_iscsi_name:iqn.1986-03.com.ibm:2145.svc1a.svc1b
+      #failover_iscsi_alias:
+      #panel_name:154883
+      #enclosure_id:
+      #canister_id:
+      #enclosure_serial_number:
+      #service_IP_address:10.10.8.192
+      #service_gateway:10.10.8.36
+      #service_subnet_mask:255.255.255.0
+      #service_IP_address_6:
+      #service_gateway_6:
+      #service_prefix_6:
+      #
+      #
+      $cmd = "$ssh $ssh_userid\@$host svcinfo lsnode -delim : $key";				#define command to be run
+      print "   running $cmd \n" if ($verbose eq "yes");
+      open(SSH,"$cmd |") or die "$!\n";
+      while (<SSH>) {
+         $nodes{$key}{name}=$1          if ( /^name:([a-zA-Z0-9_\-]+)/ );			#assign value to hash
+         $nodes{$key}{config_node}=$1   if ( /^config_node:([a-zA-Z0-9_\-]+)/ );		#assign value to hash
+         $nodes{$key}{status}=$1        if ( /^status:([a-zA-Z0-9_\-]+)/ );			#assign value to hash
+      }
+      close SSH;
+   }												#end of foreach block
+   #
+   #
+   # loop through the hash values and alert if any of the SVC nodes are not in the "online" state
+   $nodecount = 0;										#initialize variable
+   foreach $key (sort keys %nodes) {
+      next unless ( $nodes{$key}{status} );							#skip any blank entries
+      if ( $nodes{$key}{status} ne "online" ) {
+         $output_message = "$CHECK_NAME CRITICAL - the SVC node $nodes{$key}{name} is $nodes{$key}{status}. \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $CRITICAL;
+      }												#end of if block
+      # Get a count of the number of SVC nodes in the cluster. Confirm there are at least 2.
+      $nodecount++ if ( $nodes{$key}{name}); 
+   }												#end of foreach loop
+   if ( $nodecount == 0 ) {
+      $output_message = "$CHECK_NAME WARN - there are only $nodecount SVC nodes in the cluster.  This seems to be an impossible number, because a minimum of one node is required for even a degraded clustter.  Please confirm this script can communicate with the cluster. \n";
+      print "$output_message";		#print output to screen
+      print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+      send_email_alert;			#call subroutine to send email alert
+      exit $CRITICAL;
+   }												#end of if block
+   if ( $nodecount < 2 ) {
+      $output_message = "$CHECK_NAME CRITICAL - there are only $nodecount SVC nodes in the cluster.  There should be at least 2 nodes in any SVC cluster. \n";
+      print "$output_message";		#print output to screen
+      print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+      send_email_alert;			#call subroutine to send email alert
+      exit $CRITICAL;
+   }												#end of if block
+   if ( $nodecount > 8 ) {
+      $output_message = "$CHECK_NAME CRITICAL - there are $nodecount SVC nodes in the cluster.  There should be a maximum of 8 nodes in any SVC cluster. \n";
+      print "$output_message";		#print output to screen
+      print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+      send_email_alert;			#call subroutine to send email alert
+      exit $CRITICAL;
+   }												#end of if block
+   if ( ($nodecount % 2) != 0 ) {								#modulus function to see if there are an even number of nodes
+      $output_message = "$CHECK_NAME CRITICAL - there are $nodecount SVC nodes in the cluster.  There should always be an even number of nodes in any SVC cluster. \n";
+      print "$output_message";		#print output to screen
+      print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+      send_email_alert;			#call subroutine to send email alert
+      exit $CRITICAL;
+   }												#end of if block
+}												#end of subroutine
+
+
+
+
+sub check_email_server {
+   #
+   print "running check_email_server subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   # Confirm there is an email server defined for sending alerts
+   #
+   # You will see command output similar to the following:
+   # IBM_2145:pcced1svc1a:nagios>lsemailserver -delim :
+   # id:name:IP_address:port
+   # 0:emailserver0:10.10.8.56:25
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsemailserver -delim :";				#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      next if ( /^id:/ ); 									#skip header row
+      if ( /^[0-9]+:[a-zA-Z0-9]+:([a-zA-Z0-9\.]+):([0-9]+)/ ) {
+         $smtp_ipaddr = $1;									#assign meaningful variable name
+         $smtp_port   = $2;									#assign meaningful variable name
+         print "   found email server $smtp_ipaddr port $smtp_port \n" if ($verbose eq "yes");
+      }												#end of if block
+   }												#end of while loop
+   close SSH;											#close filehandle
+   #
+   # confirm the SMTP server was found
+   unless ($smtp_ipaddr) {
+      print "$CHECK_NAME WARN - Could not find a defined SMTP server for sending email alerts.  Please check the notification settings. \n";
+      exit $WARN;                                                               #exit script
+   }
+   # ping the SMTP server
+   #
+   $ping_status = "";                                                           #initialize variable
+   $cmd = "$ping -c 1 $smtp_ipaddr";						#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   if( ! open( PING, "$cmd |" ) ) {
+      print "$CHECK_NAME WARN - Could not ping SMTP server $smtp_ipaddr because: $!\n";
+      exit $WARN;                                                               #exit script
+   }                                                                            #end of if block
+   while (<PING>) {                                                             #read a line from STDIN
+      if ( (/100% packet loss/) || (/100% loss/) ) {;                           #look for timeout message
+         $ping_status = "failed";
+         print "   did not receive ping reply from $smtp_ipaddr \n" if ($verbose eq "yes");
+      }                                                                         #end of if block
+      if ( (/ 0% packet loss/) || (/ 0% loss/) ) {;                             #look for timeout message
+         $ping_status = "success";
+         print "   received ping reply from $smtp_ipaddr \n" if ($verbose eq "yes");
+      }                                                                         #end of if block
+   }                                                                            #end of while loop
+   close PING;                                                                  #close filehandle
+   if ( $ping_status eq "failed" ) {                                            #check for flag value
+      print "$CHECK_NAME WARN - No ping reply from SMTP server $smtp_ipaddr.  This means the storage system cannot send alerts or inventory via email.  Please check the email notification settings. \n";
+      exit $WARN;                                                           #exit script
+   }                                                                            #end of if block
+}                                                                               #end of subroutine
+
+
+
+sub check_ntp_server {
+   #
+   print "running check_ntp_server subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   # We should already have figured out the NTP server IP address from the check_cluster subroutine
+   foreach $key (sort keys %clusters) {
+      #
+      next if ( $clusters{$key}{location} eq "remote" );                                                        #skip SVC clusters that are connected via a relationship
+      #
+      # confirm the NTP server was found
+      unless ($clusters{$key}{cluster_ntp_IP_address}) {
+         print "$CHECK_NAME WARN - Could not find a defined NTP server for time synchronization.  Please check the date and time settings. \n";
+         exit $WARN;                                                               #exit script
+      } 									#end of unless block
+      #
+      # ping the NTP server
+      #
+      $ping_status = "";                                                           #initialize variable
+      $cmd = "$ping -c 1 $clusters{$key}{cluster_ntp_IP_address}";						#define command to be run 
+      print "   running $cmd \n" if ($verbose eq "yes"); 
+      if( ! open( PING, "$cmd |" ) ) {
+         print "$CHECK_NAME WARN - Could not ping NTP server $clusters{$key}{cluster_ntp_IP_address} because: $!\n";
+         exit $WARN;                                                               #exit script
+      }                                                                            #end of if block
+      while (<PING>) {                                                             #read a line from STDIN
+         if ( (/100% packet loss/) || (/100% loss/) ) {;                           #look for timeout message
+            $ping_status = "failed";
+            print "   did not receive ping reply from $clusters{$key}{cluster_ntp_IP_address} \n" if ($verbose eq "yes");
+         }                                                                         #end of if block
+         if ( (/ 0% packet loss/) || (/ 0% loss/) ) {;                             #look for timeout message
+            $ping_status = "success";
+            print "   received ping reply from $clusters{$key}{cluster_ntp_IP_address} \n" if ($verbose eq "yes");
+         }                                                                         #end of if block
+      }                                                                            #end of while loop
+      close PING;                                                                  #close filehandle
+      if ( $ping_status eq "failed" ) {                                            #check for flag value
+         print "$CHECK_NAME WARN - No ping reply from NTP server $clusters{$key}{cluster_ntp_IP_address}.  This means the storage system cannot keep its clock in sync.  Please check the date and time settings. \n";
+         exit $WARN;                                                           #exit script
+      }                                                                            #end of if block
+   } 										#end of foreach loop
+}                                                                               #end of subroutine
+
+
+
+
+
+
+sub check_controllers {
+   #
+   print "running check_controllers subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   # Get a list of all the controllers.  
+   # These are the external disk subsystems virtualized by the SVC/V7000.
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lscontroller -delim :";				#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      next if ( /^id:/ ); 									#skip header row
+      if ( /^([0-9]+)/ ) {
+         $controllers{$1}{id}=$1;
+         $num_external_controllers++; 								#increment counter
+         print "   found controller $1 \n" if ($verbose eq "yes");
+      }												#end of if block
+   }												#end of while loop
+   close SSH;											#close filehandle
+   #
+   #
+   #
+   # Now we know the numeric id of all the controllers.
+   # Check each controller to make sure there are no degraded mdisks or vdisks.
+   #
+   foreach $key (sort keys %controllers) {
+      #
+      $cmd = "$ssh $ssh_userid\@$host svcinfo lscontroller -delim : $key";                    		#define command to be run
+      print "   running $cmd \n" if ($verbose eq "yes");
+      open(SSH,"$cmd |") or die "$!\n";
+      while (<SSH>) {
+         $controllers{$key}{controller_name}=$1  if ( /^controller_name:([a-zA-Z0-9\-\.]+)/ );    	#assign value to hash
+         $controllers{$key}{vendor_id}=$1        if ( /^vendor_id:([a-zA-Z0-9\-\.]+)/ );    		#assign value to hash
+         $controllers{$key}{degraded}=$1         if ( /^degraded:([a-z]+)/ );                     	#assign value to hash
+      }	  												#end of while loop
+      close SSH; 											#close filehandle
+   }                                                                                                    #end of foreach block
+   #
+   # Now that we have gathered all the data, loop through the hash and alert on any problems found.
+   foreach $key (sort keys %controllers) {
+      if ( $controllers{$key}{degraded} eq "yes" ) {
+         $output_message = "$CHECK_NAME CRITICAL - external disk subsystem controller $controllers{$key}{controller_name} has degraded disks. \n";
+         print "$output_message";				#print output to screen
+         print_to_outputfile;				#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;					#call subroutine to send email alert
+         exit $CRITICAL;
+      }                                                         #end of if block
+   }								#end of foreach block
+}								#end of subroutine
+
+
+
+
+
+
+
+
+sub check_mdisks {
+   #
+   print "running check_mdisks subroutine \n" if ($verbose eq "yes");
+   #
+
+   # This command may generate multiple lines of ouput.  One line for each mdisk. An example is shown below:
+   #IBM_2145:1svc1a:admin>svcinfo lsmdisk -delim :
+   #id:name:status:mode:mdisk_grp_id:mdisk_grp_name:capacity:ctrl_LUN_#:controller_name:UID:tier
+   #0:ds3500_quorum1:online:managed:0:quorum:20.0GB:0000000000000017:controller0:60080e50002376b8000003734f899b1900000000000000000000000000000000:generic_hdd
+   #1:ds3500_quorum2:online:managed:0:quorum:20.0GB:0000000000000018:controller0:60080e50002379b2000003774f899b5700000000000000000000000000000000:generic_hdd
+   #2:ds3500_quorum3:online:managed:0:quorum:20.0GB:0000000000000019:controller0:60080e50002376b8000003764f899b3f00000000000000000000000000000000:generic_hdd
+   #3:ds3500_mdisk24:online:managed:4:pool01:371.6GB:00000000000000B:controller0:60080e50002379b20000037f4f96c2ee00000000000000000000000000000000:generic_hdd
+   #
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsmdisk -delim :";	#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      next if ( /^id:name/ ); 					#skip header row
+      if ( /^([0-9]+):(.*):([a-z]+):/ ) {			#find each mdisk and get the status
+         my $mdisk_id     = $1;					#assign more meaningful name
+         my $mdisk_name   = $2;					#assign more meaningful name
+         my $mdisk_status = $3;					#assign more meaningful name
+         $num_mdisks++;						#increment counter
+         print "   mdisk $mdisk_id status is $mdisk_status \n" if ($verbose eq "yes");
+         if ( $mdisk_status eq "offline" ) {
+            $output_message = "$CHECK_NAME CRITICAL - mdisk with id=$mdisk_id name=$mdisk_name is offline \n";
+            print "$output_message";				#print output to screen
+            print_to_outputfile;			#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+            send_email_alert;					#call subroutine to send email alert
+            exit $CRITICAL;
+         }							#end of if block
+         if ( $mdisk_status eq "degraded" ) {
+            $output_message = "$CHECK_NAME WARN - mdisk with id=$mdisk_id name=$mdisk_name is degraded.  This may mean that an SVC node or fibre switch is offline, etc. \n";
+            print "$output_message";				#print output to screen
+            print_to_outputfile;				#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+            send_email_alert;					#call subroutine to send email alert
+            exit $WARN;						#exit script
+         }							#end of if block
+      }								#end of if block 
+   }	  							#end of while loop
+   close SSH; 							#close filehandle
+}								#end of subroutine
+
+
+
+
+sub check_vdisks {
+   #
+   print "running check_vdisks subroutine \n" if ($verbose eq "yes");
+   #
+
+   # This command may generate multiple lines of ouput.  One line for each vdisk. An example is shown below:
+   #IBM_2145:svc1a:admin>svcinfo lsvdisk -delim :
+   #id:name:IO_group_id:IO_group_name:status:mdisk_grp_id:mdisk_grp_name:capacity:type:FC_id:FC_name:RC_id:RC_name:vdisk_UID:fc_map_count:copy_count:fast_write_state:se_copy_count
+   #0:bi01_rootvg:0:io_grp0:online:4:ds3500_1_pool001:51.00GB:striped:::::60050768018085AD8000000000000000:0:1:empty:0
+   #1:ep01_rootvg:0:io_grp0:online:4:ds3500_1_pool001:51.00GB:striped:::::60050768018085AD8000000000000001:0:1:not_empty:0
+   #2:sb01_rootvg:0:io_grp0:online:4:ds3500_1_pool001:34.00GB:striped:::::60050768018085AD8000000000000002:0:1:not_empty:0
+   #
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsvdisk -delim :";	#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      next if ( /^id:name/ ); 					#skip header row
+      if ( /^([0-9]+):(.*):[0-9]+:io_grp[0-9]+:([a-z]+):/ ) {	#find each vdisk and get the status
+         my $vdisk_id     = $1;					#assign more meaningful name
+         my $vdisk_name   = $2;					#assign more meaningful name
+         my $vdisk_status = $3;					#assign more meaningful name
+         $num_vdisks++;						#increment counter
+         print "   vdisk $vdisk_id status is $vdisk_status \n" if ($verbose eq "yes");
+         if ( $vdisk_status eq "offline" ) {
+            $output_message =  "$CHECK_NAME CRITICAL - vdisk with id=$vdisk_id name=$vdisk_name is offline \n";
+            print "$output_message";				#print output to screen
+            print_to_outputfile;				#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+            send_email_alert;					#call subroutine to send email alert
+            exit $CRITICAL;
+         }							#end of if block
+         if ( $vdisk_status eq "degraded" ) {
+            $output_message = "$CHECK_NAME WARN - vdisk with id=$vdisk_id name=$vdisk_name is degraded.  This may mean that an SVC node or fibre switch is offline, etc. \n";
+            print "$output_message";				#print output to screen
+            print_to_outputfile;				#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+            send_email_alert;					#call subroutine to send email alert
+            exit $WARN;
+         }							#end of if block
+      }								#end of if block 
+   }	  							#end of while loop
+   close SSH; 							#close filehandle
+}								#end of subroutine
+
+
+
+
+sub check_physical_disks {
+   #
+   print "running check_physical_disks subroutine \n" if ($verbose eq "yes");
+   #
+   # NOTE: this command only shows *internal* drives.
+   #       In other words, since an SVC virtualizes externally attached storage, this will return zero on an SVC.
+   #       However, on a Storwize V3700/V5000/V7000, it will check all the internally installed disks.
+   #
+   # This command may generate multiple lines of ouput.  One line for each physical disk. An example is shown below:
+   #IBM_2076:v7000prod:admin>svcinfo lsdrive -delim :
+   #id:status:error_sequence_number:use:tech_type:capacity:mdisk_id:mdisk_name:member_id:enclosure_id:slot_id:node_id:node_name
+   #0:online::member:sas_ssd:372.1GB:10:mdisk24_ssd:0:1:23::
+   #1:offline::member:sas_ssd:372.1GB:10:mdisk24_ssd:1:1:24::
+   #2:online::spare:sas_ssd:372.1GB::::1:22::
+   #
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsdrive -delim :";	#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      next if ( /^id:name/ ); 					#skip header row
+      if ( /^([0-9]+):([a-zA-Z]+):/ ) {				#find each physical disk and get the status
+         my $pdisk_id     = $1;					#assign more meaningful name
+         my $pdisk_status = $2;					#assign more meaningful name
+         $num_pdisks++;						#increment counter
+         print "   physical disk $pdisk_id status is $pdisk_status \n" if ($verbose eq "yes");
+         if ( $pdisk_status eq "offline" ) {
+            $output_message = "$CHECK_NAME CRITICAL - physical disk with id=$pdisk_id is offline \n";
+            print "$output_message";				#print output to screen
+            print_to_outputfile;				#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+            send_email_alert;					#call subroutine to send email alert
+            exit $CRITICAL;
+         }							#end of if block
+      }								#end of if block 
+   }	  							#end of while loop
+   close SSH; 							#close filehandle
+}								#end of subroutine
+
+
+
+
+sub check_slots {
+   #
+   print "running check_slots subroutine \n" if ($verbose eq "yes");
+   #
+
+   # This command may generate multiple lines of ouput.  One line for each slot in each enclosure. An example is shown below:
+   #IBM_Storwize:corpv3700:superuser>lsenclosureslot
+   # enclosure_id slot_id port_1_status port_2_status drive_present drive_id
+   # 1            1       online        online        yes           23
+   # 1            2       online        online        yes           22
+   # 1            3       online        online        yes           19
+   # 1            4       online        online        yes           21
+   # 1            5       online        online        yes           16
+   # 1            6       online        online        yes           18
+   # 2            1       online        online        yes           15
+   # 2            2       online        online        no
+   #
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsenclosureslot -delim :";	#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   open(SSH,"$cmd |") or die "$!\n"; 					#open filehandle using command output
+   while (<SSH>) { 							#read a line from the filehandle
+      next if ( /^enclosure_id/ ); 					#skip header row
+      $num_slots++; 							#running tally of number of drive slots
+      if ( /^([0-9]+):([0-9]+):([a-z]+):([a-z]+):([a-z]+):([0-9]+)/ ){ 	#find each slot
+         $slots{$6}{enclosure_id}  = $1; 				#assign value to hash
+         $slots{$6}{slot_id}       = $2; 				#assign value to hash
+         $slots{$6}{port_1_status} = $3; 				#assign value to hash
+         $slots{$6}{port_2_status} = $4; 				#assign value to hash
+         $slots{$6}{drive_present} = $5; 				#assign value to hash
+         $slots{$6}{drive_id}      = $6; 				#assign value to hash
+         print "      enclosure_id:$slots{$6}{enclosure_id} slot_id:$slots{$6}{slot_id} drive_present:$slots{$6}{drive_present} \n" if ($verbose eq "yes");
+      }									#end of if block 
+   }	  								#end of while loop
+   close SSH; 								#close filehandle
+   #
+   # Now we know the enclosure_id and slot_id for all slots in the system.
+   # Get additional detail about each slot.
+   #
+   # This command may generate multiple lines of ouput.  One line for each slot in each enclosure. An example is shown below:
+   #IBM_Storwize:corpv3700:superuser>lsenclosureslot -slot 1 3
+   # enclosure_id 3
+   # slot_id 1
+   # port_1_status online
+   # port_2_status online
+   # fault_LED off
+   # powered yes
+   # drive_present yes
+   # drive_id 69
+   # error_sequence_number
+   # interface_speed 6Gb
+   #
+   # 
+   foreach $key (keys %slots) {
+      next unless ( $slots{$key}{drive_present} eq "yes" ); 		#skip any slots that do not have a drive present
+      #
+      $slots{$key}{fault_LED} = ""; 					#initialize variable
+      #
+      $cmd = "$ssh $ssh_userid\@$host svcinfo lsenclosureslot -delim : -slot $slots{$key}{slot_id} $slots{$key}{enclosure_id}";			#define command to be run 
+      print "   running $cmd \n" if ($verbose eq "yes"); 
+      open(SSH,"$cmd |") or die "$!\n";					#open filehandle using command output
+      while (<SSH>) { 							#read a line from the filehandle
+         next if ( /^enclosure_id/ ); 					#skip header row
+         if ( /^fault_LED:([a-z_]+)/ ){ 				#look for fault_LED
+            $slots{$key}{fault_LED}    = $1; 				#assign value to hash
+            print "      enclosure_id:$slots{$key}{enclosure_id} slot_id:$slots{$key}{slot_id} fault_LED:$slots{$key}{fault_LED} \n" if ($verbose eq "yes");
+         }								#end of if block 
+      }	  								#end of while loop
+      close SSH; 							#close filehandle
+   }  									#end of foreach loop
+   #
+   # 
+   # Now that we know all the details about each slot, see if there are any problems.
+   foreach $key (keys %slots) {
+      next unless ( $slots{$key}{drive_present} eq "yes" ); 		#skip any slots that do not have a drive present
+      if ( $slots{$key}{fault_LED} eq "on" ) {
+         $output_message = "$CHECK_NAME WARN - fault light is on for enclosure $slots{$key}{enclosure_id} slot $slots{$key}{slot_id}.  This indicates a failed drive. \n";
+         print "$output_message";					#print output to screen
+         print_to_outputfile;						#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;						#call subroutine to send email alert
+         exit $WARN;							#exit script
+      }  								#end of if block
+      if ( $slots{$key}{fault_LED} eq "slow_flashing" ) {
+         $output_message = "$CHECK_NAME WARN - identify light is flashing for enclosure $slots{$key}{enclosure_id} slot $slots{$key}{slot_id}.  The identify light will mask the drive fault light, so you should turn off the identify flasher after you have identified this drive.  Sample command: svctask chenclosureslot -identify no -slot $slots{$key}{slot_id} $slots{$key}{enclosure_id} \n";
+         print "$output_message";					#print output to screen
+         print_to_outputfile;						#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;						#call subroutine to send email alert
+         exit $WARN;							#exit script
+      }  								#end of if block
+   }  									#end of foreach loop
+}									#end of subroutine
+
+
+sub check_fc_consistency_group_status {
+   #
+   print "running check_fc_consistency_group_status subroutine \n" if ($verbose eq "yes");
+   #
+   # This subroutine is for flashcopies within the same SVC/V7000.
+   # Flashcopy is used to make point-in-time copies of existing LUNs, often for backup purposes.
+   #
+   # Since flashcopies are normally done on a one-off basis for temporary use (ie for backups), 
+   # the flashcopy volumes are not continuously kept in sync.  For this reason, we don't need to check anything.
+}								#end of subroutine
+
+
+
+
+
+sub check_rc_consistency_group_status {
+   #
+   # Metro mirrors can optionally belong to a "remote copy consistency group".  
+   # This lets the SVC treat all the metro mirrors that belong to that consistency group as a grouping.
+   # This is important when mirroring things like databases, as it ensures that the DB and logs get mirrored in a consisent fashion.
+   #
+   print "running check_rc_consistency_group_status subroutine \n" if ($verbose eq "yes");
+   #
+
+   # This command may generate multiple lines of ouput.  One line for each consistency group. An example is shown below:
+   #IBM_2145:svc1a:admin>svcinfo lsrcconsistgrp
+   #id name master_cluster_id master_cluster_name aux_cluster_id   aux_cluster_name primary state                   relationship_count copy_type
+   #0  PRD  0000020060216B60  svc1a         0000020060216A64 svc2a      master  consistent_synchronized 9                  metro
+   #1  DEV  0000020060216B60  svc1a         0000020060216A64 svc2a      master  consistent_synchronized 3                  metro
+   #2  TST  0000020060216B60  svc1a         0000020060216A64 svc2a      master  consistent_synchronized 2                  metro
+   #
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsrcconsistgrp -delim :";	#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      next if ( /^id:name/ ); 						#skip header row
+      if ( /^([0-9]+):/ ) {						#get the numeric ID of each metro mirror relationship
+         print "   found consistency group $1 \n" if ($verbose eq "yes");
+         $consistencygroups{$1}{id}=$1;					#assign value to hash
+      }									#end of if block 
+   }	  								#end of while loop
+   close SSH; 								#close filehandle
+   #
+   # At this point, we have a hash with keys that contain the numeric ID of each metro mirror consistency group.
+   # We will now loop through each of those consistency groups and get more detailed information.
+   foreach $key (sort keys %consistencygroups) {
+      # This will generate multiple lines of ouput that looks similar to the following:
+      #IBM_2145:svc1a:admin>svcinfo lsrcconsistgrp -delim :  0
+      #id:0
+      #name:PRD
+      #master_cluster_id:0000020060216B60
+      #master_cluster_name:svc1a
+      #aux_cluster_id:0000020060216A64
+      #aux_cluster_name:svc2a
+      #primary:master
+      #state:consistent_synchronized    <---------- this is what we are interested in 
+      #relationship_count:9             <-----------number of mirrors in the consistency group
+      #freeze_time:
+      #status:
+      #sync:
+      #copy_type:metro
+      #RC_rel_id:10
+      #RC_rel_name:rel_PRD
+      #RC_rel_id:12
+      #RC_rel_name:rel_PRDdb2prd
+      #RC_rel_id:13
+      #RC_rel_name:rel_PRDlog
+      #RC_rel_id:14
+      #RC_rel_name:rel_PRDlogarch
+      #RC_rel_id:15
+      #RC_rel_name:r_PRDsapmntprd
+      #RC_rel_id:37
+      #RC_rel_name:rel_PRDsapdata1
+      #RC_rel_id:38
+      #RC_rel_name:rel_PRDsapdata2
+      #RC_rel_id:39
+      #RC_rel_name:rel_PRDsapdata3
+      #RC_rel_id:40
+      #RC_rel_name:rel_PRDsapdata4
+      #
+      #
+      $cmd = "$ssh $ssh_userid\@$host svcinfo lsrcconsistgrp -delim : $key";					#define command to be run
+      print "   running $cmd \n" if ($verbose eq "yes");
+      open(SSH,"$cmd |") or die "$!\n";
+      while (<SSH>) {
+         $consistencygroups{$key}{id}=$1                  if ( /^id:([0-9]+)/ );				#assign value to hash
+         $consistencygroups{$key}{name}=$1                if ( /^name:([a-zA-Z0-9_\-]+)/ );			#assign value to hash
+         $consistencygroups{$key}{master_cluster_name}=$1 if ( /^master_cluster_name:([a-zA-Z0-9_\-]+)/ );	#assign value to hash
+         $consistencygroups{$key}{state}=$1               if ( /^state:([a-zA-Z0-9_\-]+)/ );			#assign value to hash
+         $consistencygroups{$key}{copy_type}=$1           if ( /^copy_type:([a-zA-Z0-9_\-]+)/ );		#assign value to hash
+      }	  													#end of while loop
+      close SSH; 												#close filehandle
+   }														#end of foreach block
+   #
+   #
+   #
+   # Sometimes the mirrors can fail if there is a network interruption or if the WAN link gets saturated.
+   # Unfortunately, the mirrors do not restart automatically.
+   # This section will automatically restart any consistency group in a stopped state
+   # NOTE: If you ever manually stop the mirrors for a disaster recovery test, this script
+   #       will automatically restart the mirror!  That would be bad!
+   #       If you want to manually restart the mirror, set $restart_stopped_mirrors to "no" at the top of this script.
+   #
+   # NOTE: The -force switch is required because:
+   #       
+   foreach $key (sort keys %consistencygroups) {
+      if ( $consistencygroups{$key}{state} eq "consistent_stopped" ) {
+         if ( $restart_stopped_mirrors eq "yes" ) {
+            print "   attempting to restart stopped consistency group $consistencygroups{$key}{name} \n" if ($verbose eq "yes");
+            $cmd = "$ssh $ssh_userid\@$host svctask startrcconsistgrp -force $consistencygroups{$key}{id}"; 	#define command to be run
+            print "   running $cmd \n" if ($verbose eq "yes");
+            open(SSH,"$cmd |") or die "$!\n"; 									#open filehandle using command output
+            close SSH; 												#close filehandle
+         }                                                             				               	#end of if block
+      }                                                                        				       	#end of if block
+   }                                                                           				       	#end of foreach block
+   #
+   #
+   # Now that we have gathered all the data, loop through the hash and alert on any problems found.
+   foreach $key (sort keys %consistencygroups) {
+      next if ( $consistencygroups{$key}{state} eq "consistent_synchronized");	#skip consistency groups that are consistent
+      next if ( $consistencygroups{$key}{state} eq "consistent_copying");	#skip consistency groups that are consistent
+      next if ( $consistencygroups{$key}{state} eq "consistent_stopped");	#skip consistency groups that are consistent
+      $output_message = "$CHECK_NAME CRITICAL - SVC metro mirror consistency group $consistencygroups{$key}{name} is in state $consistencygroups{$key}{state}. \n";
+      print "$output_message";					#print output to screen
+      print_to_outputfile;					#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+      send_email_alert;						#call subroutine to send email alert
+      exit $CRITICAL;						#exit script
+   } 								#end of foreach loop
+}								#end of subroutine
+
+
+
+
+
+
+
+sub get_mirror_status {
+   #
+   print "running get_mirror_status subroutine \n" if ($verbose eq "yes");
+   #
+   # This subroutine will check individual volumes that are in a metro/global mirror to a remote SVC/V7000.
+   # Note that this subroutine only checks volumes that are NOT in a remote copy consistency group.
+   #
+   # This command may generate multiple lines of ouput.  One line for each mirror relationship.  An example is shown below:
+   # Run "svcinfo lsrcrelationship" on the SVC cluster.
+   # You should get output that looks similar to the following (requires a very wide screen to view):
+   #
+   # IBM_2145:svc1a:admin>svcinfo lsrcrelationship
+   # id name            master_cluster_id master_cluster_name master_vdisk_id master_vdisk_name aux_cluster_id   aux_cluster_name aux_vdisk_id aux_vdisk_name  primary consistency_group_id consistency_group_name state                   bg_copy_priority progress copy_type
+   # 10 rel_PRD         0000020060216B60  svc1a  10    PRD               0000020060216A64 svc2a   38   PRD_mm          master   consistent_synchronized 50  global
+   # 12 rel_PRDdb2prd   0000020060216B60  svc1a  12    PRDdb2prd         0000020060216A64 svc2a   41   PRDdb2prd_mm    master   consistent_synchronized 50  metro
+   # 13 rel_PRDlog      0000020060216B60  svc1a  13    PRDlog            0000020060216A64 svc2a   39   PRDlog_mm       master   consistent_synchronized 50  global
+   # 14 rel_PRDlogarch  0000020060216B60  svc1a  14    PRDlogarch        0000020060216A64 svc2a   40   PRDlogarch_mm   master   consistent_synchronized 50  metro
+   # 15 r_PRDsapmntprd  0000020060216B60  svc1a  15    PRDsapmntprd      0000020060216A64 svc2a   61   PRDsapmntprd_mm master   consistent_synchronized 50  metro
+   # 37 rel_PRDsapdata1 0000020060216B60  svc1a  37    PRDsapdata1       0000020060216A64 svc2a   34   PRDsapdata1_mm  master   consistent_synchronized 50  metro
+   # 38 rel_PRDsapdata2 0000020060216B60  svc1a  38    PRDsapdata2       0000020060216A64 svc2a   35   PRDsapdata2_mm  master   consistent_synchronized 50  metro
+   # 39 rel_PRDsapdata3 0000020060216B60  svc1a  39    PRDsapdata3       0000020060216A64 svc2a   36   PRDsapdata3_mm  master   consistent_synchronized 50  metro
+   # 40 rel_PRDsapdata4 0000020060216B60  svc1a  40    PRDsapdata4       0000020060216A64 svc2a   37   PRDsapdata4_mm  master   consistent_synchronized 50  metro
+   # 43 r_PRDusrsapprd  0000020060216B60  svc1a  43    PRDusrsapprd      0000020060216A64 svc2a   60   PRDusrsapprd_mm master   consistent_synchronized 50  metro
+   #
+   
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsrcrelationship -delim :";	#define command to be run
+   print "   running $cmd \n" if ($verbose eq "yes");
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      next if ( /^id:name/ ); 						#skip header row
+      if ( /^([0-9]+):/ ) {						#get the numeric ID of each metro mirror relationship
+         print "      found metro mirror $1 \n" if ($verbose eq "yes");
+         $mirrors{$1}{id}=$1;						#assign value to hash
+      }									#end of if block 
+   }	  								#end of while loop
+   close SSH; 								#close filehandle
+   #
+   # At this point, we have a hash with keys that contain the numeric ID of each metro mirror relationship.
+   # We will now loop through each of those mirror relationships and get more detailed information.
+   foreach $key (sort keys %mirrors) {
+      # This will generate multiple lines of ouput that looks similar to the following:
+      #id:10
+      #name:rel_PRD
+      #master_cluster_id:0000020060216B60
+      #master_cluster_name:svc1a
+      #master_vdisk_id:10
+      #master_vdisk_name:PRD
+      #aux_cluster_id:0000020060216A64
+      #aux_cluster_name:svc2a
+      #aux_vdisk_id:38
+      #aux_vdisk_name:PRD_mm
+      #primary:master
+      #consistency_group_id:
+      #consistency_group_name:
+      #state:consistent_synchronized
+      #bg_copy_priority:50
+      #progress:
+      #freeze_time:
+      #status:online
+      #sync:
+      #copy_type:metro
+      #
+      $cmd = "$ssh $ssh_userid\@$host svcinfo lsrcrelationship -delim : $key";				#define command to be run
+      print "   running $cmd \n" if ($verbose eq "yes");
+      open(SSH,"$cmd |") or die "$!\n";
+      while (<SSH>) {
+         print "      $_" if ($verbose eq "yes");
+         $mirrors{$key}{name}=$1                   if ( /^name:([a-zA-Z0-9_\-]+)/ );			#assign value to hash
+         $mirrors{$key}{master_cluster_name}=$1    if ( /^master_cluster_name:([a-zA-Z0-9_\-]+)/ );
+         $mirrors{$key}{aux_cluster_name}=$1       if ( /^aux_cluster_name:([a-zA-Z0-9_\-]+)/ );	
+         $mirrors{$key}{master_vdisk_name}=$1      if ( /^master_vdisk_name:([a-zA-Z0-9_\-]+)/ );
+         $mirrors{$key}{aux_vdisk_name}=$1         if ( /^aux_vdisk_name:([a-zA-Z0-9_\-]+)/ );
+         $mirrors{$key}{copy_type}=$1              if ( /^copy_type:([a-zA-Z0-9_\-]+)/ );
+         $mirrors{$key}{consistency_group_id}=$1   if ( /^consistency_group_id:([0-9]+)/ );	
+         $mirrors{$key}{consistency_group_name}=$1 if ( /^consistency_group_name:([a-zA-Z0-9_\-]+)/ );
+         $mirrors{$key}{state}=$1                  if ( /^state:([a-zA-Z0-9_\-]+)/ );
+         $mirrors{$key}{copy_type}=$1              if ( /^copy_type:([a-zA-Z0-9_\-]+)/ );
+      }	  												#end of while loop
+      close SSH; 											#close filehandle
+   }													#end of foreach block
+   #
+   #
+   # Sometimes the mirrors can fail if there is a network interruption or if the WAN link gets saturated.
+   # Unfortunately, the mirrors do not restart automatically.
+   # This section will automatically restart any consistency group in a stopped state
+   # NOTE: If you ever manually stop the mirrors for a disaster recovery test, this script
+   #       will automatically restart the mirror!  That would be bad!
+   #       If you want to manually restart the mirror, set $restart_stopped_mirrors to "no" at the top of this script.
+   #
+   # NOTE: The -force switch is required because:
+   #
+   foreach $key (sort keys %mirrors) {
+      next if ( $mirrors{$key}{consistency_group_id} );			#skip any mirrors in a consistency group
+      if ( $mirrors{$key}{state} eq "consistent_stopped" ) {
+         if ( $restart_stopped_mirrors eq "yes" ) {
+            print "attempting to restart stopped mirror $mirrors{$key}{name} \n" if ($verbose eq "yes");
+            $cmd = "$ssh $ssh_userid\@$host svctask startrcrelationship $mirrors{$key}{name}";          #define command to be run
+            print "   running $cmd \n" if ($verbose eq "yes");
+            open(SSH,"$cmd |") or die "$!\n"; 				#open filehandle using command output
+            close SSH; 							#close filehandle
+         }                                                              #end of if block
+      }                                                                 #end of if block
+   }           
+   # Now that we have gathered all the data, loop through the hash and alert on any problems found.
+   foreach $key (sort keys %mirrors) {
+      next if ( $mirrors{$key}{consistency_group_id} );			#skip any mirrors in a consistency group
+      next if ( $mirrors{$key}{state} eq "consistent_synchronized");	#skip consistency groups that are consistent
+      next if ( $mirrors{$key}{state} eq "consistent_copying");		#skip consistency groups that are consistent
+      next if ( $mirrors{$key}{state} eq "consistent_stopped");		#skip consistency groups that are consistent
+      $output_message = "$CHECK_NAME CRITICAL - SVC $mirrors{$key}{copy_type} mirror $mirrors{$key}{name} is in state $mirrors{$key}{state}. \n";
+      print "$output_message";						#print output to screen
+      print_to_outputfile;						#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+      send_email_alert;							#call subroutine to send email alert
+      exit $CRITICAL; 							#exit script
+   }									#end of if block
+}									#end of subroutine
+
+
+
+
+
+
+
+
+sub generate_mirror_report {
+   #
+   # Generate an HTML report that shows the mirror relationships.
+   # It is assumed there is a local web server running to make this HTML report available
+   #
+   print "running generate_html_report subroutine \n" if ($verbose eq "yes");
+   #
+   # only generate this report once per day
+   # it is wasteful of CPU cycles to generate this report every time the nagios check runs
+   return if ( -M $mirror_report < 1 );		#break out of subroutine if the $mirror_report file is less than 1 day old
+   #
+   open  REPORT, ">$mirror_report" or warn "Cannot open $mirror_report for writing: $! \n";  #open filehandle for writing
+   print REPORT "<html><title>SVC disk mirroring report</title><body> \n";
+   print REPORT "<h3>$host SVC disk mirroring report</h3> \n";
+   print REPORT "<p>This report was last generated at $cur_date from the $0 script \n";
+   print REPORT "<p>This report is automatically recreated every 24 hours \n";
+   print REPORT "<p><table border=1> \n";
+   print REPORT "<tr bgcolor=grey><th>Source SVC</th><th>Target SVC</th><th>Source LUN</th><th>Target LUN</th><th>Mirror Type</th><th>Mirror Status</th></th> \n";
+   foreach $key (sort keys %mirrors) {
+      print REPORT "<tr><td>$mirrors{$key}{master_cluster_name} </td>        ";
+      print REPORT "    <td>$mirrors{$key}{aux_cluster_name}    </td>        ";
+      print REPORT "    <td>$mirrors{$key}{master_vdisk_name}   </td>        ";
+      print REPORT "    <td>$mirrors{$key}{aux_vdisk_name}      </td>        ";
+      print REPORT "    <td>$mirrors{$key}{copy_type}           </td>        ";
+      print REPORT "    <td>$mirrors{$key}{state}               </td></tr> \n";
+   }								#end of foreach loop
+   print REPORT "</table> \n";					#HTML closing tag
+   close REPORT;						#close filehandle
+}								#end of subroutine
+
+
+sub generate_vdisk_report {
+   #
+   #
+   print "running get_vdisk_info subroutine \n" if ($verbose eq "yes");
+   #
+   # only generate this report once per day
+   # it is wasteful of CPU cycles to generate this report every time the nagios check runs
+   return if ( -M $vdisk_report < 1 );		#break out of subroutine if the $vdisk_report file is less than 1 day old
+   #
+   # This command may generate multiple lines of ouput.  One line for each mirror vdisk.  An example is shown below:
+   # Run "svcinfo lsvdiskp" on the SVC cluster.
+   # You should get output that looks similar to the following (requires a very wide screen to view):
+   # IBM_2145:svc1a:admin>svcinfo lsvdisk -delim :
+   # id:name:IO_group_id:IO_group_name:status:mdisk_grp_id:mdisk_grp_name:capacity:type:FC_id:FC_name:RC_id:RC_name:vdisk_UID:fc_map_count:copy_count:fast_write_state:se_copy_count
+   # 0:BI01_rootvg:0:io_grp0:online:1:pool001:51.00GB:striped:::::60050768018085AD8000000000000000:0:1:empty:0
+   # 1:eps01_rootvg:0:io_grp0:online:1:pool001:51.00GB:striped:::::60050768018085AD8000000000000001:0:1:not_empty:0
+   # 2:smtmp_rootvg:0:io_grp0:online:1:pool001:34.00GB:striped:::::60050768018085AD8000000000000002:0:1:empty:0
+   # 3:ecc01_db2:0:io_grp0:online:1:pool001:4.00GB:striped:::::60050768018085AD8000000000000003:0:1:not_empty:0
+   #
+   
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsvdisk -delim :";	#define command to be run
+   print "   running $cmd \n" if ($verbose eq "yes");
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      next if ( /^id:name/ ); 					#skip header row
+      if ( /^([0-9]+):/ ) {					#get the numeric ID of each metro mirror relationship
+         print "Found vdisk $1 \n" if ($verbose eq "yes");
+         $vdisks{$1}{id}=$1;					#assign value to hash
+      }								#end of if block 
+   }	  							#end of while loop
+   close SSH; 							#close filehandle
+   #
+   # At this point, we have a hash with keys that contain the numeric ID of each vdisk.
+   # We will now loop through each of those vdisks and get more detailed information.
+   foreach $key (sort keys %vdisks) {
+      # This will generate multiple lines of ouput that looks similar to the following:
+      #id:2
+      #name:smtp_rootvg
+      #IO_group_id:0
+      #IO_group_name:io_grp0
+      #status:online
+      #mdisk_grp_id:1
+      #mdisk_grp_name:pool001
+      #capacity:34.00GB
+      #type:striped
+      #FC_id:
+      #FC_name:
+      #RC_id:
+      #RC_name:
+      #vdisk_UID:60050768018085AD8000000000000002
+      #fc_map_count:0
+      #copy_count:1
+      #fast_write_state:empty
+      #se_copy_count:0
+      #
+      #
+      $cmd = "$ssh $ssh_userid\@$host svcinfo lsvdisk -delim : $key";				#define command to be run
+      print "\n-----\nrunning $cmd \n-----\n" if ($verbose eq "yes");
+      open(SSH,"$cmd |") or die "$!\n";
+      while (<SSH>) {
+         print "$_\n" if ($verbose eq "yes");
+         $vdisks{$key}{name}=$1                if ( /^name:([a-zA-Z0-9_\-]+)/ );		#assign value to hash
+         $vdisks{$key}{status}=$1              if ( /^status:([a-zA-Z0-9_\-]+)/ );		#assign value to hash
+         $vdisks{$key}{mdisk_grp_name}=$1      if ( /^mdisk_grp_name:([a-zA-Z0-9_\-]+)/ );	#assign value to hash
+         $vdisks{$key}{capacity}=$1            if ( /^capacity:([a-zA-Z0-9_\.]+)/ );		#assign value to hash
+         $vdisks{$key}{vdisk_UID}=$1           if ( /^vdisk_UID:([a-zA-Z0-9]+)/ );		#assign value to hash
+      }	  											#end of while loop
+      close SSH; 										#close filehandle
+   }												#end of foreach block
+   #
+   #
+   #
+   # At this point, we know about the vdisks, but we do not know which hosts the vdisks are mapped to.
+   # To get the mapping info, we need to run the "svcinfo lsvdiskhostmap ##" command..
+   foreach $key (sort keys %vdisks) {
+      # This will generate one line of output for every host the vdisk is mapped to.  For example:
+      #   IBM_2145:svc1a:admin>svcinfo lsvdiskhostmap 1
+      # id name         SCSI_id host_id host_name  vdisk_UID
+      #
+      #
+      $cmd = "$ssh $ssh_userid\@$host svcinfo lsvdiskhostmap -nohdr -delim : $key";		#define command to be run
+      print "\n-----\nrunning $cmd \n-----\n" if ($verbose eq "yes");
+      open(SSH,"$cmd |") or die "$!\n";
+      while (<SSH>) {
+         print "$_\n" if ($verbose eq "yes");
+         $vdisks{$key}{mapped_to_host}="unknown";						#initialize variable
+         $vdisks{$key}{mapped_to_host}=$1      if ( /^[0-9]+:[a-zA-Z0-9_\-]+:[0-9]+:[0-9]+:([a-zA-Z0-9_\-]+):/ );			#assign value to hash
+      }	  											#end of while loop
+      close SSH; 										#close filehandle
+   }												#end of foreach block
+   #
+   # Generate an HTML report that shows the vdisks relationships.
+   # It is assumed there is a local web server running to make this HTML report available
+   #
+   print "running generate_html_report subroutine \n" if ($verbose eq "yes");
+   #
+   open  REPORT, ">$vdisk_report" or warn "Cannot open $vdisk_report for writing: $! \n";  	#open filehandle for writing
+   print REPORT "<html><title>SVC vdisk report</title><body> \n";
+   print REPORT "<h3>$host SVC vdisk report</h3> \n";
+   print REPORT "<p>This report was last generated at $cur_date from the $0 script \n";
+   print REPORT "<p>This report is automatically recreated every 24 hours \n";
+   print REPORT "<p><table border=1> \n";
+   print REPORT "<tr bgcolor=grey><th>vdisk name</th><th>Status</th><th>mdisk group name</th><th>capacity</th><th>vdisk UID</th><th>Mapped to host</th> \n";
+   foreach $key (sort keys %vdisks) {
+      print REPORT "<tr><td>$vdisks{$key}{name}           </td>        ";
+      print REPORT "    <td>$vdisks{$key}{status}         </td>        ";
+      print REPORT "    <td>$vdisks{$key}{mdisk_grp_name} </td>        ";
+      print REPORT "    <td>$vdisks{$key}{capacity}       </td>        ";
+      print REPORT "    <td>$vdisks{$key}{vdisk_UID}      </td>        ";
+      print REPORT "    <td>$vdisks{$key}{mapped_to_host} </td>        ";
+   }												#end of foreach loop
+   print REPORT "</table> \n";									#HTML closing tag
+   close REPORT;										#close filehandle
+}												#end of subroutine
+
+
+
+sub check_firmware {
+   #
+   print "running check_firmware subroutine \n" if ($verbose eq "yes");
+   #
+   # This subroutine looks for firmware versions that are known to be obsolete or have known bugs
+   #
+   #
+   # Only check for buggy firmware levels on Tuesday
+   # This gives the sysadmin a reminder once a week, but still lets regular alerts happen if it takes weeks or months to update the firmware.
+   # $wday is day of week with 0=Sunday 1=Monday 2=Tuesday 3=Wednesday 4=Thursday 5=Friday 6=Saturday 
+   my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+   unless ( $wday == 2 ) {
+      print "   firmware is only checked on Tuesdays - skipping subroutine \n" if ($verbose eq "yes");
+      return;											#break out of subroutine
+   } 												#end of unless block
+
+   
+   #
+   #
+   # This section is only rarely updated - only when a critical firmware bug is announced by IBM.
+   my %firmware_buggy = ( "6.2.0.0"  =>  "is known to be buggy, and should be updated.  The canisters will reboot every 208 days.  Please update to a newer firmware." ,
+                          "6.2.0.1"  =>  "is known to be buggy, and should be updated.  The canisters will reboot every 208 days.  Please update to a newer firmware." ,
+                          "6.2.0.2"  =>  "is known to be buggy, and should be updated.  The canisters will reboot every 208 days.  Please update to a newer firmware." ,
+                          "6.2.0.3"  =>  "is known to be buggy, and should be updated.  The canisters will reboot every 208 days.  Please update to a newer firmware." ,
+                          "6.2.0.4"  =>  "is known to be buggy, and should be updated.  The canisters will reboot every 208 days.  Please update to a newer firmware." ,
+                          "6.3.0.0"  =>  "is known to be buggy, and should be updated.  The canisters will reboot every 208 days.  Please update to a newer firmware." ,
+                          "6.3.0.1"  =>  "is known to be buggy, and should be updated.  The canisters will reboot every 208 days.  Please update to a newer firmware." ,
+                          "7.4.0.9"  =>  "is known to be buggy, and should be updated.  Please refer to  http://www-01.ibm.com/support/docview.wss?uid=ssg1S1005863&myns=s033&mynp=OCSTPVGU&mync=E&cm_sp=s033-_-OCSTPVGU-_-E" ,
+                          "7.5.0.7"  =>  "is known to be buggy, and should be updated.  Please refer to  http://www-01.ibm.com/support/docview.wss?uid=ssg1S1005863&myns=s033&mynp=OCSTPVGU&mync=E&cm_sp=s033-_-OCSTPVGU-_-E" ,
+                          "7.6.0.4"  =>  "is known to be buggy, and should be updated.  Please refer to  http://www-01.ibm.com/support/docview.wss?uid=ssg1S1005863&myns=s033&mynp=OCSTPVGU&mync=E&cm_sp=s033-_-OCSTPVGU-_-E" ,
+                          "7.6.1.1"  =>  "is known to be buggy, and should be updated.  Please refer to  http://www-01.ibm.com/support/docview.wss?uid=ssg1S1005863&myns=s033&mynp=OCSTPVGU&mync=E&cm_sp=s033-_-OCSTPVGU-_-E" ,
+                          "7.6.1.3"  =>  "is known to be buggy, and should be updated.  Please refer to  http://www-01.ibm.com/support/docview.wss?uid=ssg1S1005863&myns=s033&mynp=OCSTPVGU&mync=E&cm_sp=s033-_-OCSTPVGU-_-E" ,
+                        );
+   # 
+   #
+   #
+   # This section will need to be updated every year or so, as IBM drops old firmware levels from support.
+   # The following information was gathered from http://www-01.ibm.com/software/support/lifecycleapp/PLCSearch.wss?q=v7000
+   my %firmware_obsolete = ( "1.1"  =>  "was dropped from support in Sep 2006.  Please update to a supported firmware level." ,
+                             "1.2"  =>  "was dropped from support in Apr 2007.  Please update to a supported firmware level." , 
+                             "2.1"  =>  "was dropped from support in Apr 2008.  Please update to a supported firmware level." , 
+                             "3.1"  =>  "was dropped from support in Apr 2009.  Please update to a supported firmware level." , 
+                             "4.1"  =>  "was dropped from support in Sep 2009.  Please update to a supported firmware level." , 
+                             "4.2"  =>  "was dropped from support in Sep 2010.  Please update to a supported firmware level." , 
+                             "4.3"  =>  "was dropped from support in Apr 2012.  Please update to a supported firmware level." , 
+                             "5.1"  =>  "was dropped from support in Apr 2014.  Please update to a supported firmware level." , 
+                             "6.1"  =>  "was dropped from support in Apr 2014.  Please update to a supported firmware level." , 
+                             "6.2"  =>  "was dropped from support in Apr 2014.  Please update to a supported firmware level." , 
+                             "6.3"  =>  "was dropped from support in Apr 2015.  Please update to a supported firmware level." , 
+                             "6.4"  =>  "was dropped from support in Sep 2015.  Please update to a supported firmware level." , 
+                             "7.1"  =>  "was dropped from support in Apr 2017.  Please update to a supported firmware level." , 
+                             "7.2"  =>  "was dropped from support in Apr 2017.  Please update to a supported firmware level." , 
+                             "7.3"  =>  "was dropped from support in Sep 2017.  Please update to a supported firmware level." , 
+                             "7.4"  =>  "was dropped from support in Apr 2018.  Please update to a supported firmware level." , 
+                             "7.5"  =>  "was dropped from support in Dec 2018.  Please update to a supported firmware level." , 
+                             "7.6"  =>  "was dropped from support in Apr 2019.  Please update to a supported firmware level." , 
+                             "7.7"  =>  "was dropped from support in Sep 2019.  Please update to a supported firmware level." , 
+                            #"7.8"  =>  "was dropped from support in ??? 20??.  Please update to a supported firmware level." , 
+                            #"8.1"  =>  "was dropped from support in ??? 20??.  Please update to a supported firmware level." , 
+                            #"8.2"  =>  "was dropped from support in Dec 2020.  Please update to a supported firmware level." , 
+                            #"8.3"  =>  "was dropped from support in ??? 20??.  Please update to a supported firmware level." , 
+                          );
+   #
+   print "   firmware level is $code_level \n" if ($verbose eq "yes");
+   #
+   # look for buggy firmware levels
+   foreach $key (sort keys %firmware_buggy) {
+      print "   checking for buggy firmware level $key \n" if ($verbose eq "yes");
+      if ( $key eq $code_level ) {
+         $output_message = "$CHECK_NAME WARN - firmware level $code_level $firmware_buggy{$key} \n";
+         print "$output_message";							#print output to screen
+         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;								#call subroutine to send email alert
+         exit $WARN;									#exit script
+      } 										#end of if block
+   } 											#end of foreach block
+   #
+   #
+   # Look for obsolete firmware levels
+   # The $code_level will be in this format:  7.6.0.4
+   # but the $key    will be in this format:  7.6
+   # Make comparisons easier by chopping off the last two numbers from the $code_level
+   my $code_level_major = $code_level;
+   $code_level_major =~ s/\.[0-9]+\.[0-9]+$//;						#chop off .#.#  from end of $code_level
+   print "   code_level_major is $code_level_major \n" if ($verbose eq "yes");
+   foreach $key (sort keys %firmware_obsolete) {
+      print "   checking for obsolete firmware level $key \n" if ($verbose eq "yes");
+      if ( $code_level_major eq $key ) {
+         $output_message = "$CHECK_NAME WARN - firmware level $code_level $firmware_obsolete{$key} \n";
+         print "$output_message";							#print output to screen
+         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;								#call subroutine to send email alert
+         exit $WARN;	 								#exit script
+      } 										#end of if block
+   } 											#end of foreach block
+}											#end of subroutine
+
+
+
+
+
+sub check_perf_stats {
+   #
+   # Gather assorted performance stats (cpu,cache,latency)
+   #
+   print "running check_perf_stats \n" if ($verbose eq "yes");
+   #
+   #
+   # Use the following command to get the system stats (available in SVC code 6.3 and later)
+   #IBM_2076:svc01:admin>svcinfo lssystemstats -delim :
+   #stat_name:stat_current:stat_peak:stat_peak_time
+   #cpu_pc:1:4:120702132416
+   #fc_mb:0:0:120702132631
+   #fc_io:191:336:120702132256
+   #sas_mb:76:116:120702132441
+   #sas_io:308:922:120702132256
+   #iscsi_mb:0:0:120702132631
+   #iscsi_io:0:0:120702132631
+   #write_cache_pc:0:0:120702132631
+   #total_cache_pc:66:66:120702132631
+   #vdisk_mb:0:0:120702132631
+   #vdisk_io:15:56:120702132451
+   #vdisk_ms:0:10:120702132411
+   #mdisk_mb:0:0:120702132631
+   #mdisk_io:0:15:120702132611
+   #mdisk_ms:0:11:120702132256
+   #drive_mb:76:116:120702132441
+   #drive_io:307:477:120702132441
+   #drive_ms:5:8:120702132446
+   #vdisk_r_mb:0:0:120702132631
+   #vdisk_r_io:15:42:120702132451
+   #vdisk_r_ms:0:2:120702132441
+   #vdisk_w_mb:0:0:120702132631
+   #vdisk_w_io:0:20:120702132611
+   #vdisk_w_ms:0:54:120702132416
+   #mdisk_r_mb:0:0:120702132631
+   #mdisk_r_io:0:6:120702132601
+   #mdisk_r_ms:0:5:120702132416
+   #mdisk_w_mb:0:0:120702132631
+   #mdisk_w_io:0:15:120702132611
+   #mdisk_w_ms:0:11:120702132256
+   #drive_r_mb:76:116:120702132441
+   #drive_r_io:307:467:120702132441
+   #drive_r_ms:5:10:120702132611
+   #drive_w_mb:0:0:120702132631
+   #drive_w_io:0:54:120702132411
+   #drive_w_ms:0:5:120702132141
+   #
+   #
+   #
+   # Confirm the SVC code level is 6.3.0.0 or later, as that is when the lssystemstats command appeared.
+   $_ = $code_level;
+   print "   code level is $_ \n" if ($verbose eq "yes");
+   s/\.//g;		#get rid of decimals (ie change 6.3.0.0 to 6300
+   print "   code level without the decimal places is $_ \n" if ($verbose eq "yes");
+   if ( $_ >= 6300 ) {						#only proceed if SVC code level is 6300 or higher
+      print "   SVC code level is $_, so the lssystemstats command from 6.3.0.0 should be available\n" if ($verbose eq "yes");
+      $cmd = "$ssh $ssh_userid\@$host svcinfo lssystemstats -delim :";			#define command to be run
+      print "   running $cmd \n" if ($verbose eq "yes");
+      open(SSH,"$cmd |") or die "$!\n";
+      while (<SSH>) {
+         next if ( /^stat_name/ ); 						#skip header row
+         $cpu_pc=$1 if ( /^cpu_pc:([0-9\.]+):/ );				#assign value to variable for later use
+         $write_cache_pc=$1 if ( /^write_cache_pc:([0-9\.]+):/ );		#assign value to variable for later use
+         $total_cache_pc=$1 if ( /^total_cache_pc:([0-9\.]+):/ );		#assign value to variable for later use
+         $vdisk_r_ms=$1     if ( /^vdisk_r_ms:([0-9\.]+):/ );			#assign value to variable for later use
+         $vdisk_w_ms=$1     if ( /^vdisk_w_ms:([0-9\.]+):/ );			#assign value to variable for later use
+      }
+      close SSH;
+      print "   cpu_util:${cpu_pc}\% vdisk_latency_read:${vdisk_r_ms}ms vdisk_latency_write:${vdisk_w_ms}ms \n" if ($verbose eq "yes");   
+      #
+      #
+      # send alert if CPU utilization is too high
+      if ( $cpu_pc > 90 ) {
+         $output_message = "$CHECK_NAME CRITICAL - SVC cluster CPU % utilization is $cpu_pc. \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $CRITICAL;
+      }										#end of if block
+      if ( $cpu_pc > 75 ) {
+         $output_message = "$CHECK_NAME WARN - SVC cluster CPU % utilization is $cpu_pc. \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $WARN;
+      }										#end of if block
+      #
+      #
+      # These values show the average read/write latency across ALL vdisks.
+      # It is common for just a few vdisks to have high latency, but not all of them.
+      # Therefore, it is unlikely that this alert will be triggered often.
+      # send alert if read or write latency  is too high
+      if ( $vdisk_r_ms > 50 ) {
+         $output_message = "$CHECK_NAME CRITICAL - vdisk read  latency is $vdisk_r_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $CRITICAL;
+      }										#end of if block
+      if ( $vdisk_r_ms > 30 ) {
+         $output_message = "$CHECK_NAME WARN     - vdisk read  latency is $vdisk_r_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $WARN;
+      }										#end of if block
+      if ( $vdisk_w_ms > 50 ) {
+         $output_message = "$CHECK_NAME CRITICAL - vdisk write latency is $vdisk_w_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $CRITICAL;
+      }										#end of if block
+      if ( $vdisk_w_ms > 30 ) {
+         $output_message = "$CHECK_NAME WARN     - vdisk write latency is $vdisk_w_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   \n";
+         print "$output_message";	#print output to screen
+         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;		#call subroutine to send email alert
+         exit $WARN;
+      }										#end of if block
+   }										#end of if block
+}										#end of subroutine
+
+
+
+
+
+sub check_error_logs {
+   #
+   # Check the SVC error logs
+   #
+   print "running check_error_logs \n" if ($verbose eq "yes");
+   #
+   # look at the following commands:
+   #    svcinfo finderr       <------ removed   in code level 6.3 and higher
+   #    svcinfo dumperrlog    <------ removed   in code level 6.3 and higher
+   #    svcinfo lseventlog    <------ available in code level 6.3 and higher
+   #
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lseventlog -alert yes -message no -monitoring no -fixed no -expired no -delim :";	#define command to be run
+   print "   running $cmd \n" if ($verbose eq "yes");
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      print "$_\n" if ($verbose eq "yes");						#show current event log entry
+      next if ( /^sequence_number/ ); 							#skip header row
+      next if ( /FC discovery occurred, no configuration changes were detected/ );	#skip informational message
+      if ( /Drive fault/ ) {
+         $output_message = "$CHECK_NAME CRITICAL - drive fault detected.  This usually means that a physical disk has failed and needs to be replaced.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
+         print "$output_message";							#print output to screen
+         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;								#call subroutine to send email alert
+         exit $CRITICAL; 								#exit script
+      }											#end of if block
+      if ( /Node ambient temperature threshold exceeded/ ) {
+         $output_message = "$CHECK_NAME CRITICAL - node ambient temperature threshold exceeded.  The storage array is too hot.  Check the temperature in the data centre.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
+         print "$output_message";							#print output to screen
+         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;								#call subroutine to send email alert
+         exit $CRITICAL; 								#exit script
+      }											#end of if block
+      if ( /Managed Disk error count warning threshold met/ ) {
+         $output_message = "$CHECK_NAME WARN - Managed Disk error count warning threshold met.  Please investigate.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
+         print "$output_message";							#print output to screen
+         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;								#call subroutine to send email alert
+         exit $WARN; 									#exit script
+      }											#end of if block
+      if ( /Managed Disk Group space warning/ ) {
+         $output_message = "$CHECK_NAME WARN - Managed Disk Group space warning.  Please investigate.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
+         print "$output_message";							#print output to screen
+         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;								#call subroutine to send email alert
+         exit $WARN; 									#exit script
+      }											#end of if block
+      if ( /Managed Disk is not on the preferred path/ ) {
+         $output_message = "$CHECK_NAME WARN - Managed Disk is not on the preferred path.  Please investigate.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
+         print "$output_message";							#print output to screen
+         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;								#call subroutine to send email alert
+         exit $WARN; 									#exit script
+      }											#end of if block
+      if ( /Remote Copy retry timeout/ ) {
+         $output_message = "$CHECK_NAME WARN - Remote Copy retry timeout.  Please investigate.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
+         print "$output_message";							#print output to screen
+         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;								#call subroutine to send email alert
+         exit $WARN; 									#exit script
+      }											#end of if block
+      if ( /Unable to connect to the SMTP \(e-mail\) server/ ) {
+         $output_message = "$CHECK_NAME WARN - Unable to connect to the SMTP email server for sending notifications.  Please check the date and time settings.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
+         print "$output_message";							#print output to screen
+         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         send_email_alert;								#call subroutine to send email alert
+         exit $WARN; 									#exit script
+      }											#end of if block
+      # We do not actually care about this message, because we will get an alert if the remote copy is stopped.
+      # In other words, alerting on this message would be redundant.
+      #if ( /Remote Copy stopped because of performance or fabric problems/ ) {
+      #   $output_message = "$CHECK_NAME WARN - Remote Copy stopped because of performance or fabric problems.  Please investigate.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
+      #   print "$output_message";							#print output to screen
+      #   print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+      #   send_email_alert;								#call subroutine to send email alert
+      #   exit $WARN; 									#exit script
+      #}											#end of if block
+      # We do not actually care about this message, because we will get an alert if the remote copy is stopped.
+      # In other words, alerting on this message would be redundant.
+      #if ( /Connection to a configured remote cluster has been lost/ ) {
+      #   $output_message = "$CHECK_NAME WARN - lost connection to remote cluster.  Possible network interruption to remote site.  Please investigate.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command.  NOTE: You will keep getting this alert until you clear the error log! \n";
+      #   print "$output_message";							#print output to screen
+      #   print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+      #   send_email_alert;								#call subroutine to send email alert
+      #   exit $WARN; 									#exit script
+      #}											#end of if block
+   }											#end of while loop
+   close SSH;										#close filehandle
+}											#end of subroutine
+
+
+
+
+
+sub all_clear {
+   #
+   # we only get this far if there were no problems
+   #
+   print "running all_clear subroutine \n" if ($verbose eq "yes");
+   #
+   # figure out which SVC node is the "config node" so we can report it in the "OK" message
+   foreach $key (sort keys %nodes) {
+      $config_node = $nodes{$key}{name} if ( $nodes{$key}{config_node} eq "yes" );
+   }                                                                    #end of foreach loop
+   #
+   # figure out how many mirrors there are so we can report it in the "OK" message
+   foreach $key (sort keys %mirrors) {
+      $metro_mirror_count++  if ( $mirrors{$key}{copy_type} eq "metro" );
+      $global_mirror_count++ if ( $mirrors{$key}{copy_type} eq "global" );
+   }                                                                    #end of foreach loop
+   #
+   #
+   # figure out how many consistency groups there are so we can report it in the "OK" message
+   foreach $key (sort keys %consistencygroups) {
+      $consistency_group_count++;
+   }                                                                    #end of foreach loop
+   $output_message = "$CHECK_NAME OK.  cpu_util:$cpu_pc\% config_node:$config_node node_count:$nodecount code_level:$code_level smtp:$smtp_ipaddr vdisks:$num_vdisks mdisks:$num_mdisks pdisks:$num_pdisks external_storage_systems:$num_external_controllers consistency_groups:$consistency_group_count metro_mirrors:$metro_mirror_count global_mirrors:$global_mirror_count vdisk_read_latency:${vdisk_r_ms}ms vdisk_write_latency:${vdisk_w_ms}ms\n";
+   print "$output_message";                                             #print output to screen
+   print_to_outputfile;                                                 #call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+   exit $OK;                                                            #exit script
+}
+
+
+
+
+
+
+
+
+# --------------------------------  main body of script -------------------------------------------------
+get_options;								#check for --verbose --help parameters
+sanity_checks;								#check for required files
+check_name_resolution; 							#confirm the storage system is in DNS
+ping_remote_host;							#confirm the storage system reponds to ping
+check_for_output_file; 							#look for temporary file
+verify_credentials;							#confirm SSH key pairs allow login to storage system
+check_cluster_status; 							#check NTP settings, email notifications
+check_node_status;							#confirm all the storage controller nodes are online
+check_email_server;							#confirm the SMTP server used for email alerts responds to ping
+check_ntp_server;							#confirm the NTP  server used for time sync    responds to ping
+check_controllers;							#check any external disk subsystems
+check_mdisks;								#confirm all mdisks are online
+check_vdisks;								#confirm all vdisks are online
+check_physical_disks;							#confirm all physical disks are only - not applicable to SVC
+check_slots;								#check each drive slot for errors
+check_fc_consistency_group_status;					#check flash  copy consistency groups
+check_rc_consistency_group_status;					#check remote copy consistency groups
+get_mirror_status; 							#check the state of the site-to-site disk mirrors
+generate_mirror_report;							#generate an HTML report showing all the site-to-site disk mirrors
+generate_vdisk_report;							#generate an HTML report showing all the vdisk names and sizes
+check_firmware;								#look for obsolete or buggy firmware versions
+check_perf_stats;							#check assorted performance stats (cpu,cache,latency)
+check_error_logs;							#look for entries in the error logs
+all_clear;								#only get this far if there are no problems
+
+
