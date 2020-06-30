@@ -64,15 +64,15 @@ If the nagios userid on the nagios server does not already have an SSH key pair,
    
 Copy the contents of $HOME/.ssh/id_rsa.pub to a temporary file on your desktop.  This file will be used to upload the SSH public key to the storage system via a web browser.
    
-Perform the following steps on the storage system:
-a) Point your web browser at the management interface.  Login as superuser (or equivalent).
-b) Click User Management, Users, New user
-c) Set the username to: nagios
-d) Set the Authentication mode to: local
-e) Set the User Group to: monitor   (this is a read-only account) (set to administrator group if you want to restart stopped mirrors)
-f) Click the Browse button to find the SSH public key for the nagios account.
-g) Select the temp file you created earlier.
-h) Click the Create button
+Perform the following steps on the storage system:  
+a) Point your web browser at the management interface.  Login as superuser (or equivalent).  
+b) Click User Management, Users, New user  
+c) Set the username to: nagios  
+d) Set the Authentication mode to: local  
+e) Set the User Group to: monitor   (this is a read-only account) (set to administrator group if you want to restart stopped mirrors)  
+f) Click the Browse button to find the SSH public key for the nagios account.  
+g) Select the temp file you created earlier.  
+h) Click the Create button  
    
 You will need to manually ssh from the nagios server to each storage system to update the known_hosts file on the nagios server.  
     $ ssh admin@10.10.8.191
