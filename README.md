@@ -3,7 +3,7 @@ nagios check for IBM SVC / Storwize / Spectrum Virtualize / FlashSystem storage
 
 NOTES
 -----
-This script runs on a nagios server and connects to an IBM SVC / Storwize / Spectrum Virtualization / FlashSystem via SSH to check the following:
+This script runs on a nagios server and connects to an IBM SVC / Storwize / Spectrum Virtualize / FlashSystem via SSH to check the following:
 - name resolution
 - ping reply
 - SSH connectivity
