@@ -32,9 +32,9 @@ nagios check for IBM SVC / Storwize / Spectrum Virtualize / FlashSystem storage
 
  SUPPORTED OPERATING SYSTEMS
  ---------------------------
-  Tested on AIX 6.1, 7.1, 7.2
-  Tested on CentOS 7, CentOS 8, Ubuntu 20.04
-  Will likely work on any UNIX-like operating system with perl and ssh
+  - Tested on AIX 6.1, 7.1, 7.2
+  - Tested on CentOS 7, CentOS 8, Ubuntu 20.04
+  - Will likely work on any UNIX-like operating system with perl and ssh
 
 
 
@@ -46,6 +46,7 @@ nagios check for IBM SVC / Storwize / Spectrum Virtualize / FlashSystem storage
      For AIX               (perl should already be in base install)  
 
   It is assumed that this script is being run as a low-privileged user (typically nagios)
+  
   It is assumed that SSH key pairs have been created between the nagios server and the storage system.
 
 
@@ -83,11 +84,9 @@ nagios check for IBM SVC / Storwize / Spectrum Virtualize / FlashSystem storage
 
  USAGE 
  -----
-  This script is executed remotely on a monitored system by the NRPE or check_by_ssh
-  methods available in nagios.
+  This script is executed remotely on a monitored system by the NRPE or check_by_ssh methods available in nagios.
 
-  If you are using the check_by_ssh method, you will need a section in the services.cfg
-  file on the nagios server that looks similar to the following.
+  If you are using the check_by_ssh method, you will need a section in the services.cfg file on the nagios server that looks similar to the following.
   This assumes that you already have ssh key pairs configured.
     
        define service{
@@ -97,8 +96,7 @@ nagios check for IBM SVC / Storwize / Spectrum Virtualize / FlashSystem storage
            check_command                   check_by_ssh!"/usr/local/nagios/libexec/check_ibm_flashsystem"
            }
 
-  If you are using the check_nrpe method, you will need a section in the services.cfg
-  file on the nagios server that looks similar to the following.
+  If you are using the check_nrpe method, you will need a section in the services.cfg file on the nagios server that looks similar to the following.
   This assumes that you already have ssh key pairs configured.
   
        define service{
@@ -118,26 +116,5 @@ nagios check for IBM SVC / Storwize / Spectrum Virtualize / FlashSystem storage
      `1,16,31,46 * * * * /usr/local/nagios/libexec/check_ibm_flashsystem v7000prod  1>/dev/null 2>/dev/null`
      `1,16,31,46 * * * * /usr/local/nagios/libexec/check_ibm_flashsystem v7000dev   1>/dev/null 2>/dev/null`
      `1,16,31,46 * * * * /usr/local/nagios/libexec/check_ibm_flashsystem svc01      1>/dev/null 2>/dev/null`
-
-
-
-
-
-
-
-
-
-
-   
-   
-   
-   
-
-   
-   
-   
-   
-   
-   
- 
-
+     
+  
