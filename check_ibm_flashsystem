@@ -1,4 +1,4 @@
-#!/usr/bin/perl -sW
+#!/usr/bin/perl -w
 
 
 
@@ -24,34 +24,38 @@
 
 # CHANGE LOG
 # ----------
-#  2011/03/04	Nick Jeffrey	Script created
-#  2011/04/25	Nick Jeffrey	generate HTML report for viewing mirror relationships from local web server
-#  2011/04/25	Nick Jeffrey	generate HTML report for viewing vdisks from local web server
-#  2012/07/01	Nick Jeffrey	add check_cpu_load subroutine
-#  2012/07/01	Nick Jeffrey	add check_controllers subroutine
-#  2012/07/01	Nick Jeffrey	add check_mdisks subroutine
-#  2012/07/01	Nick Jeffrey	add check_vdisks subroutine
-#  2012/11/26	Nick Jeffrey	add functionality to automatically restart stopped remote copy mirrors and consistency groups
-#  2012/11/26	Nick Jeffrey	enhancements to check_cpu_load subroutine
-#  2012/11/26	Nick Jeffrey	rename check_cpu_load subroutine to check_perf_stats, and add checks for latency as well
-#  2015/04/17	Nick Jeffrey	add check_slots subroutine
-#  2015/04/28	Nick Jeffrey	fix bug in check_error_logs subroutine - split command was splitting on spaces instead of newlines
-#  2015/04/30	Nick Jeffrey	add check_physical_disks subroutine to look for offline physical disk drives
-#  2015/07/24   Nick Jeffrey    Remove dependency on Net::SSH::Perl module - does not install on AIX
-#  2015/09/01   Nick Jeffrey    This check times out on storage systems with lots of disks to check - execute via cron and write to temporary files
-#  2015/09/01   Nick Jeffrey    Add print_to_outputfile subroutine
-#  2015/09/08   Nick Jeffrey    Get rid of $out,$err,$exit variables  - leftovers from Net::SSH::Perl module
-#  2015/09/14   Nick Jeffrey    Bug fix - missing open statement before while loop to check fault_LED status in check_slots subroutine
-#  2016/06/24   Nick Jeffrey    Do not alert on global mirrors in state consistent_copying or consistent_stopped
-#  2016/07/01   Nick Jeffrey    Add check_firmware subroutine
-#  2016/07/25   Nick Jeffrey    Bug fix in check_firmware subroutine - was not calling print_to_outputfile subroutine
-#  2016/08/22   Nick Jeffrey    Add send_email subroutine in case this script is being called from cron instead of from nagios
-#  2016/08/23   Nick Jeffrey    Move check_error_logs subroutine to bottom to ensure all the other subroutines have a chance to run even if errors exist in the log
-#  2016/08/23   Nick Jeffrey    Move check_perf_stats subroutine to bottom to ensure all the other subroutines have a chance to run even if errors exist in the log
-#  2016/09/13   Nick Jeffrey    add check_email_server, check_ntp_server, verify_credentials subroutines
-#  2016/09/20   Nick Jeffrey    Remove redundant checks from error logs for lost connection to remote system
-#  2020/06/29	Nick Jeffrey	Add GetOpt::Long for --verbose switch
-#  2020/06/29	Nick Jeffrey	Script renamed from check_svc to check_ibm_flashsystem due to IBM rebranding storage product lines
+#  2011/03/04	njeffrey	Script created
+#  2011/04/25	njeffrey	generate HTML report for viewing mirror relationships from local web server
+#  2011/04/25	njeffrey	generate HTML report for viewing vdisks from local web server
+#  2012/07/01	njeffrey	add check_cpu_load subroutine
+#  2012/07/01	njeffrey	add check_controllers subroutine
+#  2012/07/01	njeffrey	add check_mdisks subroutine
+#  2012/07/01	njeffrey	add check_vdisks subroutine
+#  2012/11/26	njeffrey	add functionality to automatically restart stopped remote copy mirrors and consistency groups
+#  2012/11/26	njeffrey	enhancements to check_cpu_load subroutine
+#  2012/11/26	njeffrey	rename check_cpu_load subroutine to check_perf_stats, and add checks for latency as well
+#  2015/04/17	njeffrey	add check_slots subroutine
+#  2015/04/28	njeffrey	fix bug in check_error_logs subroutine - split command was splitting on spaces instead of newlines
+#  2015/04/30	njeffrey	add check_physical_disks subroutine to look for offline physical disk drives
+#  2015/07/24   njeffrey    	Remove dependency on Net::SSH::Perl module - does not install on AIX
+#  2015/09/01   njeffrey    	This check times out on storage systems with lots of disks to check - execute via cron and write to temporary files
+#  2015/09/01   njeffrey    	Add print_to_outputfile subroutine
+#  2015/09/08   njeffrey    	Get rid of $out,$err,$exit variables  - leftovers from Net::SSH::Perl module
+#  2015/09/14   njeffrey    	Bug fix - missing open statement before while loop to check fault_LED status in check_slots subroutine
+#  2016/06/24   njeffrey    	Do not alert on global mirrors in state consistent_copying or consistent_stopped
+#  2016/07/01   njeffrey    	Add check_firmware subroutine
+#  2016/07/25   njeffrey    	Bug fix in check_firmware subroutine - was not calling print_to_outputfile subroutine
+#  2016/08/22   njeffrey    	Add send_email subroutine in case this script is being called from cron instead of from nagios
+#  2016/08/23   njeffrey    	Move check_error_logs subroutine to bottom to ensure all the other subroutines have a chance to run even if errors exist in the log
+#  2016/08/23   njeffrey    	Move check_perf_stats subroutine to bottom to ensure all the other subroutines have a chance to run even if errors exist in the log
+#  2016/09/13   njeffrey    	add check_email_server, check_ntp_server, verify_credentials subroutines
+#  2016/09/20   njeffrey    	Remove redundant checks from error logs for lost connection to remote system
+#  2020/06/29	njeffrey	Add GetOpt::Long for --verbose switch
+#  2020/06/29	njeffrey	Script renamed from check_svc to check_ibm_flashsystem due to IBM rebranding storage product lines
+#  2022/05/06	njeffrey	Tweak regex in check_mdisks subroutine
+#  2022/05/06	njeffrey	Code refactoring to save all errors in a variable and report on multiple errors, instead of just alerting on the first error found
+#  2022/05/06	njeffrey	Add more error messages to check_error_log subroutine 
+#  2022/05/06	njeffrey	Change $CHECK_NAME from "SVC checks" to "FlashSystem checks" to better reflect current product branding
 
 
 
@@ -181,7 +185,8 @@ use strict;							#enforce good coding practices
 use Getopt::Long;                       			#allow --long-switches to be used as parameters
 
 my ($host,$ssh,$ssh_status,$ssh_userid);
-my ($verbose,$outputfile,$output_message);
+my ($verbose,$outputfile,$output_message,$error_count,$error_text,$common_output_data,$perf_data);
+my ($degraded_mdisk_count,$degraded_mdisk_list,$degraded_vdisk_count,$degraded_vdisk_list);
 my ($nslookup,$nslookup_status,$cmd);
 my ($ping,$ping_status);
 my ($smtp_ipaddr,$smtp_port,$ntp_ipaddr);
@@ -189,7 +194,7 @@ my ($opt_h,$opt_v);
 my ($OK,$WARN,$CRITICAL,$UNKNOWN,$CHECK_NAME);
 my (%nodes,%clusters,%mirrors,%consistencygroups,%vdisks,%controllers);
 my ($metro_mirror_count,$global_mirror_count,$consistency_group_count,$key);
-my ($config_node,$nodecount,@lines,$cur_date,$mirror_report,$vdisk_report,$code_level,$cpu_pc);
+my ($config_node,$nodecount,@lines,$cur_date,$mirror_report,$vdisk_report,$code_level,$cpu_pc,$cluster_name);
 my ($num_vdisks,$num_pdisks,$num_mdisks,$restart_stopped_mirrors,$write_cache_pc,$total_cache_pc);
 my ($vdisk_r_ms,$vdisk_w_ms,%slots,$num_slots,$num_external_controllers);
 my ($epoch,$dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks);
@@ -204,7 +209,7 @@ $nslookup_status          = "";					#flag for checking to see if nslookup test s
 $ping                     = "/bin/ping";                        #location of binary on nagios server
 $ping_status              = "";                                 #flag for checking to see if ping     test succeeds
 $verbose                  = "no";				#for debugging (yes=show more print output) 
-$CHECK_NAME               = "SVC checks"; 			#name of nagios check
+$CHECK_NAME               = "FlashSystem checks"; 		#name of nagios check
 $ssh_status               = "";					#status of ssh    daemon
 $metro_mirror_count       = 0;					#number of metro mirrors
 $global_mirror_count      = 0;					#number of global mirrors
@@ -222,7 +227,12 @@ $restart_stopped_mirrors  = "yes";				#yes/no flag to restart mirrors if they st
 $send_email               = "no"; 				#yes/no flag.  Choose no if script runs from nagios, choose yes if running from cron.
 $email_to                 = "itsupport\@example.com"; 		#comma separated list of email recipients
 $email_subject            = "SVC alert"; 			#subject of email
-
+$error_count              = 0;					#initialize counter variable
+$error_text               = "";					#hold details of all errors found
+$degraded_mdisk_count     = 0;					#initialize counter variable
+$degraded_mdisk_list      = "";					#hold list of mdisk names 
+$degraded_vdisk_count     = 0;					#initialize counter variable
+$degraded_vdisk_list      = "";					#hold list of vdisk names 
 #
 # Nagios return codes
 #
@@ -655,46 +665,28 @@ sub check_cluster_status {
       next if ( $clusters{$key}{location} eq "remote" );							#skip SVC clusters that are connected via a relationship
       #
       unless ( $clusters{$key}{cluster_ntp_IP_address} ) {
-         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} is not configured to sync its time against an NTP server.  Login to the web interface and click Settings, Advanced, Date and Time.  \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $WARN;
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , SVC cluster $clusters{$key}{name} is not configured to sync its time against an NTP server.  Login to the web interface and click Settings, Advanced, Date and Time.";
       }														#end of if block
       unless ( $clusters{$key}{email_contact} ) {								#this is the name of the email contact
-         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email.  \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $WARN;
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email. ";
       }														#end of if block
       unless ( $clusters{$key}{email_reply} ) {									#this is the email address of the email contact
-         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email.  \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $WARN;
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email. ";
       }														#end of if block
       unless ( $clusters{$key}{email_state} eq "running" ) {							#this tells us if the email notifications are active
-         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email.  \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $WARN;
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email.  ";
       }														#end of if block
       if ( $clusters{$key}{inventory_mail_interval} == 0 ) {							#this tells how frequently inventory details are emailed to IBM support
-         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} is not configured to send weekly inventory information to IBM support.  This means that IBM is unable to provide proactive notification of problems.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details.  \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $WARN;
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , SVC cluster $clusters{$key}{name} is not configured to send weekly inventory information to IBM support.  This means that IBM is unable to provide proactive notification of problems.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details.  ";
       }														#end of if block
       if ( $clusters{$key}{inventory_mail_interval} > 30 ) {							#this tells how frequently inventory details are emailed to IBM support
-         $output_message = "$CHECK_NAME WARN - the SVC cluster $clusters{$key}{name} sends inventory information to IBM support every $clusters{$key}{inventory_mail_interval} days.  That is a long time.  Please change the value to 7 days.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details, and a box to specify the number of days between reports.  \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $WARN;
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , SVC cluster $clusters{$key}{name} sends inventory information to IBM support every $clusters{$key}{inventory_mail_interval} days.  That is a long time.  Please change the value to 7 days.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details, and a box to specify the number of days between reports.  ";
       }														#end of if block
    }														#end of foreach loop
 }														#end of subroutine
@@ -794,46 +786,32 @@ sub check_node_status {
    #
    #
    # loop through the hash values and alert if any of the SVC nodes are not in the "online" state
+   #
    $nodecount = 0;										#initialize variable
    foreach $key (sort keys %nodes) {
       next unless ( $nodes{$key}{status} );							#skip any blank entries
       if ( $nodes{$key}{status} ne "online" ) {
-         $output_message = "$CHECK_NAME CRITICAL - the SVC node $nodes{$key}{name} is $nodes{$key}{status}. \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $CRITICAL;
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text ,CRITICAL - the SVC node $nodes{$key}{name} status=$nodes{$key}{status} (should be status=online). ";
       }												#end of if block
-      # Get a count of the number of SVC nodes in the cluster. Confirm there are at least 2.
+      # Get a count of the number of nodes in the cluster. Confirm there are at least 2.
       $nodecount++ if ( $nodes{$key}{name}); 
    }												#end of foreach loop
    if ( $nodecount == 0 ) {
-      $output_message = "$CHECK_NAME WARN - there are only $nodecount SVC nodes in the cluster.  This seems to be an impossible number, because a minimum of one node is required for even a degraded clustter.  Please confirm this script can communicate with the cluster. \n";
-      print "$output_message";		#print output to screen
-      print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-      send_email_alert;			#call subroutine to send email alert
-      exit $CRITICAL;
+      $error_count++;											#increment the total number of problems found
+      $error_text = "$error_text , WARN - there are only $nodecount SVC nodes in the cluster.  This seems to be an impossible number, because a minimum of one node is required for even a degraded cluster.  Please confirm this script can communicate with the cluster. ";
    }												#end of if block
    if ( $nodecount < 2 ) {
-      $output_message = "$CHECK_NAME CRITICAL - there are only $nodecount SVC nodes in the cluster.  There should be at least 2 nodes in any SVC cluster. \n";
-      print "$output_message";		#print output to screen
-      print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-      send_email_alert;			#call subroutine to send email alert
-      exit $CRITICAL;
+      $error_count++;											#increment the total number of problems found
+      $error_text = "$error_text , CRITICAL - there are only $nodecount SVC nodes in the cluster.  There should be at least 2 nodes in any SVC cluster. ";
    }												#end of if block
    if ( $nodecount > 8 ) {
-      $output_message = "$CHECK_NAME CRITICAL - there are $nodecount SVC nodes in the cluster.  There should be a maximum of 8 nodes in any SVC cluster. \n";
-      print "$output_message";		#print output to screen
-      print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-      send_email_alert;			#call subroutine to send email alert
-      exit $CRITICAL;
+      $error_count++;											#increment the total number of problems found
+      $error_text = "$error_text , CRITICAL - there are $nodecount SVC nodes in the cluster.  There should be a maximum of 8 nodes in any SVC cluster. ";
    }												#end of if block
    if ( ($nodecount % 2) != 0 ) {								#modulus function to see if there are an even number of nodes
-      $output_message = "$CHECK_NAME CRITICAL - there are $nodecount SVC nodes in the cluster.  There should always be an even number of nodes in any SVC cluster. \n";
-      print "$output_message";		#print output to screen
-      print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-      send_email_alert;			#call subroutine to send email alert
-      exit $CRITICAL;
+      $error_count++;											#increment the total number of problems found
+      $error_text = "$error_text , CRITICAL - there are $nodecount SVC nodes in the cluster.  There should always be an even number of nodes in any SVC cluster. ";
    }												#end of if block
 }												#end of subroutine
 
@@ -866,18 +844,20 @@ sub check_email_server {
    close SSH;											#close filehandle
    #
    # confirm the SMTP server was found
+   #
    unless ($smtp_ipaddr) {
-      print "$CHECK_NAME WARN - Could not find a defined SMTP server for sending email alerts.  Please check the notification settings. \n";
-      exit $WARN;                                                               #exit script
+      $error_count++;											#increment the total number of problems found
+      $error_text = "$error_text , WARN - Could not find a defined SMTP server for sending email alerts.  Please check the notification settings. ";
    }
+   #
    # ping the SMTP server
    #
    $ping_status = "";                                                           #initialize variable
    $cmd = "$ping -c 1 $smtp_ipaddr";						#define command to be run 
    print "   running $cmd \n" if ($verbose eq "yes"); 
    if( ! open( PING, "$cmd |" ) ) {
-      print "$CHECK_NAME WARN - Could not ping SMTP server $smtp_ipaddr because: $!\n";
-      exit $WARN;                                                               #exit script
+      $error_count++;											#increment the total number of problems found
+      $error_text = "$error_text , WARN - Could not ping SMTP server $smtp_ipaddr because: $! ";
    }                                                                            #end of if block
    while (<PING>) {                                                             #read a line from STDIN
       if ( (/100% packet loss/) || (/100% loss/) ) {;                           #look for timeout message
@@ -891,8 +871,8 @@ sub check_email_server {
    }                                                                            #end of while loop
    close PING;                                                                  #close filehandle
    if ( $ping_status eq "failed" ) {                                            #check for flag value
-      print "$CHECK_NAME WARN - No ping reply from SMTP server $smtp_ipaddr.  This means the storage system cannot send alerts or inventory via email.  Please check the email notification settings. \n";
-      exit $WARN;                                                           #exit script
+      $error_count++;											#increment the total number of problems found
+      $error_text = "$error_text , WARN - No ping reply from SMTP server $smtp_ipaddr.  This means the storage system cannot send alerts or inventory via email.  Please check the email notification settings. ";
    }                                                                            #end of if block
 }                                                                               #end of subroutine
 
@@ -909,9 +889,14 @@ sub check_ntp_server {
       next if ( $clusters{$key}{location} eq "remote" );                                                        #skip SVC clusters that are connected via a relationship
       #
       # confirm the NTP server was found
+      #
+      if ($clusters{$key}{cluster_ntp_IP_address}) {
+         $ntp_ipaddr = $clusters{$key}{cluster_ntp_IP_address};							#assign meaningful variable name for use in script output
+         print "   found NTP server $ntp_ipaddr  \n" if ($verbose eq "yes");
+      }
       unless ($clusters{$key}{cluster_ntp_IP_address}) {
-         print "$CHECK_NAME WARN - Could not find a defined NTP server for time synchronization.  Please check the date and time settings. \n";
-         exit $WARN;                                                               #exit script
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , WARN - Could not find a defined NTP server for time synchronization.  Please check the date and time settings. ";
       } 									#end of unless block
       #
       # ping the NTP server
@@ -920,8 +905,8 @@ sub check_ntp_server {
       $cmd = "$ping -c 1 $clusters{$key}{cluster_ntp_IP_address}";						#define command to be run 
       print "   running $cmd \n" if ($verbose eq "yes"); 
       if( ! open( PING, "$cmd |" ) ) {
-         print "$CHECK_NAME WARN - Could not ping NTP server $clusters{$key}{cluster_ntp_IP_address} because: $!\n";
-         exit $WARN;                                                               #exit script
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , WARN - Could not ping NTP server $clusters{$key}{cluster_ntp_IP_address} because: $!  ";
       }                                                                            #end of if block
       while (<PING>) {                                                             #read a line from STDIN
          if ( (/100% packet loss/) || (/100% loss/) ) {;                           #look for timeout message
@@ -935,8 +920,8 @@ sub check_ntp_server {
       }                                                                            #end of while loop
       close PING;                                                                  #close filehandle
       if ( $ping_status eq "failed" ) {                                            #check for flag value
-         print "$CHECK_NAME WARN - No ping reply from NTP server $clusters{$key}{cluster_ntp_IP_address}.  This means the storage system cannot keep its clock in sync.  Please check the date and time settings. \n";
-         exit $WARN;                                                           #exit script
+         $error_count++;											#increment the total number of problems found
+         $error_count =  "$error_count , WARN - No ping reply from NTP server $clusters{$key}{cluster_ntp_IP_address}.  This means the storage system cannot keep its clock in sync.  Please check the date and time settings. ";
       }                                                                            #end of if block
    } 										#end of foreach loop
 }                                                                               #end of subroutine
@@ -953,6 +938,13 @@ sub check_controllers {
    #
    # Get a list of all the controllers.  
    # These are the external disk subsystems virtualized by the SVC/V7000.
+   # Sample output:
+   # svcinfo lscontroller -delim :
+   # id:controller_name:ctrl_s/n:vendor_id:product_id_low:product_id_high:site_id:site_name
+   # 0:FLASH840-01:00e062c400e0-0000-0 :IBM     :FlashSys:tem-9840::
+   # 1:FLASH840-02:24d062a424d0-0000-0 :IBM     :FlashSys:tem-9840::
+   # 2:FLASH900-03:0c286d4c0c28-0000-0 :IBM     :FlashSys:tem-9840::
+   #
    #
    $cmd = "$ssh $ssh_userid\@$host svcinfo lscontroller -delim :";				#define command to be run 
    print "   running $cmd \n" if ($verbose eq "yes"); 
@@ -988,11 +980,8 @@ sub check_controllers {
    # Now that we have gathered all the data, loop through the hash and alert on any problems found.
    foreach $key (sort keys %controllers) {
       if ( $controllers{$key}{degraded} eq "yes" ) {
-         $output_message = "$CHECK_NAME CRITICAL - external disk subsystem controller $controllers{$key}{controller_name} has degraded disks. \n";
-         print "$output_message";				#print output to screen
-         print_to_outputfile;				#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;					#call subroutine to send email alert
-         exit $CRITICAL;
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , CRITICAL - external disk subsystem controller $controllers{$key}{controller_name} has degraded disks. ";
       }                                                         #end of if block
    }								#end of foreach block
 }								#end of subroutine
@@ -1008,7 +997,8 @@ sub check_mdisks {
    #
    print "running check_mdisks subroutine \n" if ($verbose eq "yes");
    #
-
+   # NOTE: if one of the canisters is offline, *ALL* of the mdisks will show up as degraded, because every mdisk will have a single point of failure.
+   #
    # This command may generate multiple lines of ouput.  One line for each mdisk. An example is shown below:
    #IBM_2145:1svc1a:admin>svcinfo lsmdisk -delim :
    #id:name:status:mode:mdisk_grp_id:mdisk_grp_name:capacity:ctrl_LUN_#:controller_name:UID:tier
@@ -1018,35 +1008,36 @@ sub check_mdisks {
    #3:ds3500_mdisk24:online:managed:4:pool01:371.6GB:00000000000000B:controller0:60080e50002379b20000037f4f96c2ee00000000000000000000000000000000:generic_hdd
    #
    #
-   $cmd = "$ssh $ssh_userid\@$host svcinfo lsmdisk -delim :";	#define command to be run 
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsmdisk -delim :";			#define command to be run 
    print "   running $cmd \n" if ($verbose eq "yes"); 
    open(SSH,"$cmd |") or die "$!\n";
    while (<SSH>) {
-      next if ( /^id:name/ ); 					#skip header row
-      if ( /^([0-9]+):(.*):([a-z]+):/ ) {			#find each mdisk and get the status
-         my $mdisk_id     = $1;					#assign more meaningful name
-         my $mdisk_name   = $2;					#assign more meaningful name
-         my $mdisk_status = $3;					#assign more meaningful name
-         $num_mdisks++;						#increment counter
+      next if ( /^id:name/ ); 							#skip header row
+      if ( /^([0-9]+):([a-zA-Z0-9_\-\.]+):([a-z]+):/ ) {			#find each mdisk and get the status
+         my $mdisk_id     = $1;							#assign more meaningful name
+         my $mdisk_name   = $2;							#assign more meaningful name
+         my $mdisk_status = $3;							#assign more meaningful name
+         $num_mdisks++;								#increment counter
          print "   mdisk $mdisk_id status is $mdisk_status \n" if ($verbose eq "yes");
          if ( $mdisk_status eq "offline" ) {
-            $output_message = "$CHECK_NAME CRITICAL - mdisk with id=$mdisk_id name=$mdisk_name is offline \n";
-            print "$output_message";				#print output to screen
-            print_to_outputfile;			#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-            send_email_alert;					#call subroutine to send email alert
-            exit $CRITICAL;
-         }							#end of if block
+            $error_count++;							#increment the total number of problems found
+            $error_text  = "$error_text , CRITICAL - mdisk with id=$mdisk_id name=$mdisk_name is offline, which usually means a failed disk. ";
+         }									#end of if block
          if ( $mdisk_status eq "degraded" ) {
-            $output_message = "$CHECK_NAME WARN - mdisk with id=$mdisk_id name=$mdisk_name is degraded.  This may mean that an SVC node or fibre switch is offline, etc. \n";
-            print "$output_message";				#print output to screen
-            print_to_outputfile;				#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-            send_email_alert;					#call subroutine to send email alert
-            exit $WARN;						#exit script
-         }							#end of if block
-      }								#end of if block 
-   }	  							#end of while loop
-   close SSH; 							#close filehandle
-}								#end of subroutine
+            $error_count++;							#increment the total number of problems found
+            $degraded_mdisk_count++;						#increment the total number of mdisks in a degraded state so we can avoid duplicate errors in the output
+            $degraded_mdisk_list = "$degraded_mdisk_list,$mdisk_name";		#create a comma separated list of all the mdisks in a degraded state
+         }									#end of if block
+      }										#end of if block 
+   }	  									#end of while loop
+   close SSH; 									#close filehandle
+   if ( ($degraded_mdisk_count >  0) && ($degraded_mdisk_count < 5) ) {		#if there are 1-5 degraded mdisks, print out their names
+      $error_text = "$error_text , WARN - these $degraded_mdisk_count mdisks are in a degraded state:$degraded_mdisk_list.  This may indicate a failed canister, offline fibre switch, RAID array rebuild, etc. ";
+   }										#end of if block
+   if ( ($degraded_mdisk_count >= 5) ) {					#if there are >5 degraded mdisks, just show the total number instead of listing all the names to keep the output a reasonable size.
+      $error_text = "$error_text , WARN - there are $degraded_mdisk_count mdisks in a degraded state. This may indicate a failed canister, offline fibre switch, RAID array rebuild, etc. ";
+   }										#end of if block
+}										#end of subroutine
 
 
 
@@ -1064,35 +1055,36 @@ sub check_vdisks {
    #2:sb01_rootvg:0:io_grp0:online:4:ds3500_1_pool001:34.00GB:striped:::::60050768018085AD8000000000000002:0:1:not_empty:0
    #
    #
-   $cmd = "$ssh $ssh_userid\@$host svcinfo lsvdisk -delim :";	#define command to be run 
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsvdisk -delim :";			#define command to be run 
    print "   running $cmd \n" if ($verbose eq "yes"); 
    open(SSH,"$cmd |") or die "$!\n";
    while (<SSH>) {
-      next if ( /^id:name/ ); 					#skip header row
-      if ( /^([0-9]+):(.*):[0-9]+:io_grp[0-9]+:([a-z]+):/ ) {	#find each vdisk and get the status
-         my $vdisk_id     = $1;					#assign more meaningful name
-         my $vdisk_name   = $2;					#assign more meaningful name
-         my $vdisk_status = $3;					#assign more meaningful name
-         $num_vdisks++;						#increment counter
+      next if ( /^id:name/ ); 							#skip header row
+      if ( /^([0-9]+):(.*):[0-9]+:io_grp[0-9]+:([a-z]+):/ ) {			#find each vdisk and get the status
+         my $vdisk_id     = $1;							#assign more meaningful name
+         my $vdisk_name   = $2;							#assign more meaningful name
+         my $vdisk_status = $3;							#assign more meaningful name
+         $num_vdisks++;								#increment counter
          print "   vdisk $vdisk_id status is $vdisk_status \n" if ($verbose eq "yes");
          if ( $vdisk_status eq "offline" ) {
-            $output_message =  "$CHECK_NAME CRITICAL - vdisk with id=$vdisk_id name=$vdisk_name is offline \n";
-            print "$output_message";				#print output to screen
-            print_to_outputfile;				#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-            send_email_alert;					#call subroutine to send email alert
-            exit $CRITICAL;
-         }							#end of if block
+            $error_count++;							#increment the total number of problems found
+            $error_text = "$error_text , CRITICAL - vdisk with id=$vdisk_id name=$vdisk_name is offline.  ";
+         }									#end of if block
          if ( $vdisk_status eq "degraded" ) {
-            $output_message = "$CHECK_NAME WARN - vdisk with id=$vdisk_id name=$vdisk_name is degraded.  This may mean that an SVC node or fibre switch is offline, etc. \n";
-            print "$output_message";				#print output to screen
-            print_to_outputfile;				#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-            send_email_alert;					#call subroutine to send email alert
-            exit $WARN;
-         }							#end of if block
-      }								#end of if block 
-   }	  							#end of while loop
-   close SSH; 							#close filehandle
-}								#end of subroutine
+            $error_count++;							#increment the total number of problems found
+            $degraded_vdisk_count++;						#increment the total number of vdisks in a degraded state so we can avoid duplicate errors in the output
+            $degraded_vdisk_list = "$degraded_vdisk_list,$vdisk_name";		#create a comma separated list of all the mdisks in a degraded state
+         }									#end of if block
+      }										#end of if block 
+   }	  									#end of while loop
+   close SSH; 									#close filehandle		
+   if ( ($degraded_vdisk_count >  0) && ($degraded_vdisk_count < 5) ) {		#if there are 1-5 degraded vdisks, print out their names
+      $error_text = "$error_text , WARN - these $degraded_vdisk_count vdisks are in a degraded state:$degraded_vdisk_list.  This may indicate a failed canister, offline fibre switch, RAID array rebuild, etc. ";
+   }										#end of if block
+   if ( ($degraded_vdisk_count >= 5) ) {					#if there are >5 degraded vdisks, just show the total number instead of listing all the names to keep the output a reasonable size.
+      $error_text = "$error_text , WARN - there are $degraded_vdisk_count vdisks in a degraded state. This may indicate a failed canister, offline fibre switch, RAID array rebuild, etc. ";
+   }										#end of if block
+}										#end of subroutine
 
 
 
@@ -1124,11 +1116,8 @@ sub check_physical_disks {
          $num_pdisks++;						#increment counter
          print "   physical disk $pdisk_id status is $pdisk_status \n" if ($verbose eq "yes");
          if ( $pdisk_status eq "offline" ) {
-            $output_message = "$CHECK_NAME CRITICAL - physical disk with id=$pdisk_id is offline \n";
-            print "$output_message";				#print output to screen
-            print_to_outputfile;				#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-            send_email_alert;					#call subroutine to send email alert
-            exit $CRITICAL;
+            $error_count++;											#increment the total number of problems found
+            $error_text = "$error_text , CRITICAL - physical disk with id=$pdisk_id is offline.  ";
          }							#end of if block
       }								#end of if block 
    }	  							#end of while loop
@@ -1214,18 +1203,13 @@ sub check_slots {
    foreach $key (keys %slots) {
       next unless ( $slots{$key}{drive_present} eq "yes" ); 		#skip any slots that do not have a drive present
       if ( $slots{$key}{fault_LED} eq "on" ) {
-         $output_message = "$CHECK_NAME WARN - fault light is on for enclosure $slots{$key}{enclosure_id} slot $slots{$key}{slot_id}.  This indicates a failed drive. \n";
-         print "$output_message";					#print output to screen
-         print_to_outputfile;						#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;						#call subroutine to send email alert
-         exit $WARN;							#exit script
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , WARN - fault light is on for enclosure $slots{$key}{enclosure_id} slot $slots{$key}{slot_id}.  This indicates a failed drive. ";
       }  								#end of if block
       if ( $slots{$key}{fault_LED} eq "slow_flashing" ) {
-         $output_message = "$CHECK_NAME WARN - identify light is flashing for enclosure $slots{$key}{enclosure_id} slot $slots{$key}{slot_id}.  The identify light will mask the drive fault light, so you should turn off the identify flasher after you have identified this drive.  Sample command: svctask chenclosureslot -identify no -slot $slots{$key}{slot_id} $slots{$key}{enclosure_id} \n";
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , WARN - identify light is flashing for enclosure $slots{$key}{enclosure_id} slot $slots{$key}{slot_id}.  The identify light will mask the drive fault light, so you should turn off the identify flasher after you have identified this drive.  Sample command: svctask chenclosureslot -identify no -slot $slots{$key}{slot_id} $slots{$key}{enclosure_id}  ";
          print "$output_message";					#print output to screen
-         print_to_outputfile;						#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;						#call subroutine to send email alert
-         exit $WARN;							#exit script
       }  								#end of if block
    }  									#end of foreach loop
 }									#end of subroutine
@@ -1355,11 +1339,8 @@ sub check_rc_consistency_group_status {
       next if ( $consistencygroups{$key}{state} eq "consistent_synchronized");	#skip consistency groups that are consistent
       next if ( $consistencygroups{$key}{state} eq "consistent_copying");	#skip consistency groups that are consistent
       next if ( $consistencygroups{$key}{state} eq "consistent_stopped");	#skip consistency groups that are consistent
-      $output_message = "$CHECK_NAME CRITICAL - SVC metro mirror consistency group $consistencygroups{$key}{name} is in state $consistencygroups{$key}{state}. \n";
-      print "$output_message";					#print output to screen
-      print_to_outputfile;					#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-      send_email_alert;						#call subroutine to send email alert
-      exit $CRITICAL;						#exit script
+      $error_count++;											#increment the total number of problems found
+      $error_text = "$error_text , CRITICAL - SVC metro mirror consistency group $consistencygroups{$key}{name} is in state $consistencygroups{$key}{state}. ";
    } 								#end of foreach loop
 }								#end of subroutine
 
@@ -1478,11 +1459,8 @@ sub get_mirror_status {
       next if ( $mirrors{$key}{state} eq "consistent_synchronized");	#skip consistency groups that are consistent
       next if ( $mirrors{$key}{state} eq "consistent_copying");		#skip consistency groups that are consistent
       next if ( $mirrors{$key}{state} eq "consistent_stopped");		#skip consistency groups that are consistent
-      $output_message = "$CHECK_NAME CRITICAL - SVC $mirrors{$key}{copy_type} mirror $mirrors{$key}{name} is in state $mirrors{$key}{state}. \n";
-      print "$output_message";						#print output to screen
-      print_to_outputfile;						#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-      send_email_alert;							#call subroutine to send email alert
-      exit $CRITICAL; 							#exit script
+      $error_count++;											#increment the total number of problems found
+      $error_text = "$error_text , WARN - SVC $mirrors{$key}{copy_type} mirror $mirrors{$key}{name} is in state $mirrors{$key}{state}.  ";
    }									#end of if block
 }									#end of subroutine
 
@@ -1698,10 +1676,12 @@ sub check_firmware {
                              "7.5"  =>  "was dropped from support in Dec 2018.  Please update to a supported firmware level." , 
                              "7.6"  =>  "was dropped from support in Apr 2019.  Please update to a supported firmware level." , 
                              "7.7"  =>  "was dropped from support in Sep 2019.  Please update to a supported firmware level." , 
-                            #"7.8"  =>  "was dropped from support in ??? 20??.  Please update to a supported firmware level." , 
-                            #"8.1"  =>  "was dropped from support in ??? 20??.  Please update to a supported firmware level." , 
-                            #"8.2"  =>  "was dropped from support in Dec 2020.  Please update to a supported firmware level." , 
+                            #"7.8"  =>  "was dropped from support in Dec 2022.  Please update to a supported firmware level." , 
+                             "8.1"  =>  "was dropped from support in Dec 2020.  Please update to a supported firmware level." , 
+                            #"8.2"  =>  "was dropped from support in Sep 2022.  Please update to a supported firmware level." , 
                             #"8.3"  =>  "was dropped from support in ??? 20??.  Please update to a supported firmware level." , 
+                            #"8.4"  =>  "was dropped from support in ??? 20??.  Please update to a supported firmware level." , 
+                            #"8.5"  =>  "was dropped from support in ??? 20??.  Please update to a supported firmware level." , 
                           );
    #
    print "   firmware level is $code_level \n" if ($verbose eq "yes");
@@ -1710,11 +1690,8 @@ sub check_firmware {
    foreach $key (sort keys %firmware_buggy) {
       print "   checking for buggy firmware level $key \n" if ($verbose eq "yes");
       if ( $key eq $code_level ) {
-         $output_message = "$CHECK_NAME WARN - firmware level $code_level $firmware_buggy{$key} \n";
-         print "$output_message";							#print output to screen
-         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;								#call subroutine to send email alert
-         exit $WARN;									#exit script
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , WARN - firmware level $code_level $firmware_buggy{$key} ";
       } 										#end of if block
    } 											#end of foreach block
    #
@@ -1729,11 +1706,8 @@ sub check_firmware {
    foreach $key (sort keys %firmware_obsolete) {
       print "   checking for obsolete firmware level $key \n" if ($verbose eq "yes");
       if ( $code_level_major eq $key ) {
-         $output_message = "$CHECK_NAME WARN - firmware level $code_level $firmware_obsolete{$key} \n";
-         print "$output_message";							#print output to screen
-         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;								#call subroutine to send email alert
-         exit $WARN;	 								#exit script
+         $error_count++;											#increment the total number of problems found
+         $error_text = "$error_text , WARN - firmware level $code_level $firmware_obsolete{$key} ";
       } 										#end of if block
    } 											#end of foreach block
 }											#end of subroutine
@@ -1815,18 +1789,12 @@ sub check_perf_stats {
       #
       # send alert if CPU utilization is too high
       if ( $cpu_pc > 90 ) {
-         $output_message = "$CHECK_NAME CRITICAL - SVC cluster CPU % utilization is $cpu_pc. \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $CRITICAL;
+         $error_count++;							#increment the total number of problems found
+         $error_text = "$error_text , CRITICAL - SVC cluster CPU % utilization is $cpu_pc. ";
       }										#end of if block
       if ( $cpu_pc > 75 ) {
-         $output_message = "$CHECK_NAME WARN - SVC cluster CPU % utilization is $cpu_pc. \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $WARN;
+         $error_count++;							#increment the total number of problems found
+         $error_text = "$error_text WARN - SVC cluster CPU % utilization is $cpu_pc. ";
       }										#end of if block
       #
       #
@@ -1835,32 +1803,28 @@ sub check_perf_stats {
       # Therefore, it is unlikely that this alert will be triggered often.
       # send alert if read or write latency  is too high
       if ( $vdisk_r_ms > 50 ) {
-         $output_message = "$CHECK_NAME CRITICAL - vdisk read  latency is $vdisk_r_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $CRITICAL;
+         $error_count++;							#increment the total number of problems found
+         unless ( $error_text =~ /vdisk read  latency/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , CRITICAL - vdisk read  latency is $vdisk_r_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   ";
+         }									#end of unless block
       }										#end of if block
       if ( $vdisk_r_ms > 30 ) {
-         $output_message = "$CHECK_NAME WARN     - vdisk read  latency is $vdisk_r_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $WARN;
+         $error_count++;							#increment the total number of problems found
+         unless ( $error_text =~ /vdisk read  latency/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , WARN     - vdisk read  latency is $vdisk_r_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   ";
+         }									#end of unless block
       }										#end of if block
       if ( $vdisk_w_ms > 50 ) {
-         $output_message = "$CHECK_NAME CRITICAL - vdisk write latency is $vdisk_w_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $CRITICAL;
+         $error_count++;							#increment the total number of problems found
+         unless ( $error_text =~ /vdisk write latency/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , CRITICAL - vdisk write latency is $vdisk_w_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   ";
+         }									#end of unless block
       }										#end of if block
       if ( $vdisk_w_ms > 30 ) {
-         $output_message = "$CHECK_NAME WARN     - vdisk write latency is $vdisk_w_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   \n";
-         print "$output_message";	#print output to screen
-         print_to_outputfile;		#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;		#call subroutine to send email alert
-         exit $WARN;
+         $error_count++;							#increment the total number of problems found
+         unless ( $error_text =~ /vdisk write latency/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , WARN     - vdisk write latency is $vdisk_w_ms milliseconds.  This is a significant performance hit.  Try to reduce the workload on this vdisk.   ";
+         }									#end of unless block
       }										#end of if block
    }										#end of if block
 }										#end of subroutine
@@ -1881,6 +1845,11 @@ sub check_error_logs {
    #    svcinfo lseventlog    <------ available in code level 6.3 and higher
    #
    #
+   # NOTE: it is common for the same error message to be repeated in the logs multiple times.  
+   # For example, if the managed disk group is nearly out of space, the same message will appear in the error log every day.
+   # We want to avoid having duplicate error messages in the output of this script, so we check to see if the error message text 
+   # already exists in the $error_text variable before adding.
+   #   
    $cmd = "$ssh $ssh_userid\@$host svcinfo lseventlog -alert yes -message no -monitoring no -fixed no -expired no -delim :";	#define command to be run
    print "   running $cmd \n" if ($verbose eq "yes");
    open(SSH,"$cmd |") or die "$!\n";
@@ -1888,55 +1857,87 @@ sub check_error_logs {
       print "$_\n" if ($verbose eq "yes");						#show current event log entry
       next if ( /^sequence_number/ ); 							#skip header row
       next if ( /FC discovery occurred, no configuration changes were detected/ );	#skip informational message
-      if ( /Drive fault/ ) {
-         $output_message = "$CHECK_NAME CRITICAL - drive fault detected.  This usually means that a physical disk has failed and needs to be replaced.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
-         print "$output_message";							#print output to screen
-         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;								#call subroutine to send email alert
-         exit $CRITICAL; 								#exit script
+      if ( /Drive fault/ ) {								#This is important enough that we are ok with duplicate messages in the script output
+         $error_count++;								#increment the total number of problems found
+         $error_text = "$error_text , CRITICAL - drive fault detected.  This usually means that a physical disk has failed and needs to be replaced.  ";
       }											#end of if block
       if ( /Node ambient temperature threshold exceeded/ ) {
-         $output_message = "$CHECK_NAME CRITICAL - node ambient temperature threshold exceeded.  The storage array is too hot.  Check the temperature in the data centre.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
-         print "$output_message";							#print output to screen
-         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;								#call subroutine to send email alert
-         exit $CRITICAL; 								#exit script
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Node ambient temperature exceeded/ ) {		#do not insert duplicate messages
+            $error_text = "$error_text , CRITICAL - Node ambient temperature threshold exceeded.  The storage array is too hot.  Check the temperature in the data centre.  High temperatures can cause disks to fail prematurely, so look for any disk failures in the next few days or weeks.  ";
+         }										#end of unless block
       }											#end of if block
       if ( /Managed Disk error count warning threshold met/ ) {
-         $output_message = "$CHECK_NAME WARN - Managed Disk error count warning threshold met.  Please investigate.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
-         print "$output_message";							#print output to screen
-         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;								#call subroutine to send email alert
-         exit $WARN; 									#exit script
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Managed Disk error count warning threshold met/ ) {	#do not insert duplicate messages
+            $error_text = "$error_text , WARN - Managed Disk error count warning threshold met.  This is indicative of a failing disk.  Please submit a ticket to IBM, who will look at the diagnostic logs and may proactively replace a disk that is about to fail.  ";
+         }										#end of unless block
+      }											#end of if block
+      if ( /Drive SAS error counts exceeded warning thresholds/ ) {
+         $error_count++;								#increment the total number of problems found
+         $error_text = "$error_text , WARN - Drive SAS error counts exceeded warning thresholds.  This is indicative of a failing disk.  Please submit a ticket to IBM, who will look at the diagnostic logs and may proactively replace a disk that is about to fail. ";
       }											#end of if block
       if ( /Managed Disk Group space warning/ ) {
-         $output_message = "$CHECK_NAME WARN - Managed Disk Group space warning.  Please investigate.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
-         print "$output_message";							#print output to screen
-         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;								#call subroutine to send email alert
-         exit $WARN; 									#exit script
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Managed Disk Group space warning/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , WARN - Managed Disk Group space warning.  Please free up space by deleting obsolete vdisks, or add more storage.   ";
+         }										#end of unless block
       }											#end of if block
       if ( /Managed Disk is not on the preferred path/ ) {
-         $output_message = "$CHECK_NAME WARN - Managed Disk is not on the preferred path.  Please investigate.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
-         print "$output_message";							#print output to screen
-         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;								#call subroutine to send email alert
-         exit $WARN; 									#exit script
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Managed Disk is not on the preferred path/ ) {	#do not insert duplicate messages
+            $error_text = "$error_text , WARN - Managed Disk is not on the preferred path.  ";
+         }										#end of unless block
       }											#end of if block
       if ( /Remote Copy retry timeout/ ) {
-         $output_message = "$CHECK_NAME WARN - Remote Copy retry timeout.  Please investigate.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
-         print "$output_message";							#print output to screen
-         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;								#call subroutine to send email alert
-         exit $WARN; 									#exit script
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Remote Copy retry timeout/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , WARN - Remote Copy retry timeout.  ";
+         }										#end of unless block
       }											#end of if block
       if ( /Unable to connect to the SMTP \(e-mail\) server/ ) {
-         $output_message = "$CHECK_NAME WARN - Unable to connect to the SMTP email server for sending notifications.  Please check the date and time settings.  When done, clear the eventlog on the SVC/V7000 from the GUI by clicking Monitoring, Events.  If you prefer the CLI, login to the SVC/V7000 and run the \"clearerrlog\" command. NOTE: You will keep getting this alert until you clear the error log! \n";
-         print "$output_message";							#print output to screen
-         print_to_outputfile;								#call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-         send_email_alert;								#call subroutine to send email alert
-         exit $WARN; 									#exit script
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Unable to connect to the SMTP/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , WARN - Unable to connect to the SMTP email server for sending notifications.  Please check the date and time settings.   ";
+         }										#end of unless block
       }											#end of if block
+      if ( /Number of device logins reduced/ ) {
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Number of device logins reduced/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , WARN - Number of device logins reduced.  This means some of the SAN paths on the fibre channel ports have disappeared.  ";
+         }										#end of unless block
+      }											#end of if block
+      if ( /Insufficient redundancy in disk controller connectivity/ ) {
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Insufficient redundancy in disk controller connectivity/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , WARN - Insufficient redundancy in disk controller connectivity.  ";
+         }										#end of unless block
+      }											#end of if block
+      if ( /Array mdisk is not protected by sufficient spares/ ) {
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Array mdisk is not protected by sufficient spares/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , WARN - Array mdisk is not protected by sufficient spares.  This usually means that a drive has failed and the hot spare has been used to rebuild the array. ";
+         }										#end of unless block
+      }											#end of if block
+      if ( /Failed to transfer file from remote node/ ) {
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Failed to transfer file from remote node/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , WARN - Failed to transfer file from remote node.  ";
+         }										#end of unless block
+      }											#end of if block
+      if ( /Node memory failure/ ) {
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Node memory failure/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , WARN - Node memory failure.  This usually indicates a problem with a memory module.  ";
+         }										#end of unless block
+      }											#end of if block
+      if ( /Automatic recovery of offline node failed/ ) {
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Automatic recovery of offline node failed/ ) {	#do not insert duplicate messages
+            $error_text = "$error_text , CRITICAL - Automatic recovery of offline node failed  ";
+         }										#end of unless block
+      }											#end of if block
+      #
       # We do not actually care about this message, because we will get an alert if the remote copy is stopped.
       # In other words, alerting on this message would be redundant.
       #if ( /Remote Copy stopped because of performance or fabric problems/ ) {
@@ -1957,17 +1958,34 @@ sub check_error_logs {
       #}											#end of if block
    }											#end of while loop
    close SSH;										#close filehandle
+   #
+   # Put in a reminder to look at the event log, run the recommended fix procedure, and possibly clear the errors from the event log.
+   # We will only add this message once at the, rather than repeat for each message.
+   if ( $error_count > 0 ) {
+      $error_text = "$error_text . Please login to the storage GUI interface and look at the event log by clicking Monitoring, Events, and run the recommended fix procedures.  Be sure to fix all the errors found, or you will continue to receive this alert every day until the problem is fixed.  If you prefer the CLI, you can clear the error log with the clearerrlog command.";
+   }
 }											#end of subroutine
 
 
 
 
 
-sub all_clear {
+sub print_output {
    #
-   # we only get this far if there were no problems
+   print "running print_output subroutine \n" if ($verbose eq "yes");
    #
-   print "running all_clear subroutine \n" if ($verbose eq "yes");
+   # This check does not generate nagios performance data, so the output will be null.
+   # If performance data is added in the future, 
+   # The format is:  label=value[UOM];[warn];[crit];[min];[max]
+   # On the "label=value" section is required.  The warn|crit|min|max entries are optional.
+   # You can have multiple items of perf data, just separate each section with a space
+   # UOM is Units Of Measurement.    Can be s=seconds B=bytes MB=megabytes %=percent c=counter
+   $perf_data = "";
+   #
+   # figure out the name of the cluster so we can report it in the output message
+   foreach $key (sort keys %clusters) {
+      $cluster_name = $clusters{$key}{name};
+   }                                                                    #end of foreach loop
    #
    # figure out which SVC node is the "config node" so we can report it in the "OK" message
    foreach $key (sort keys %nodes) {
@@ -1976,7 +1994,7 @@ sub all_clear {
    #
    # figure out how many mirrors there are so we can report it in the "OK" message
    foreach $key (sort keys %mirrors) {
-      $metro_mirror_count++  if ( $mirrors{$key}{copy_type} eq "metro" );
+      $metro_mirror_count++  if ( $mirrors{$key}{copy_type} eq "metro"  );
       $global_mirror_count++ if ( $mirrors{$key}{copy_type} eq "global" );
    }                                                                    #end of foreach loop
    #
@@ -1985,10 +2003,47 @@ sub all_clear {
    foreach $key (sort keys %consistencygroups) {
       $consistency_group_count++;
    }                                                                    #end of foreach loop
-   $output_message = "$CHECK_NAME OK.  cpu_util:$cpu_pc\% config_node:$config_node node_count:$nodecount code_level:$code_level smtp:$smtp_ipaddr vdisks:$num_vdisks mdisks:$num_mdisks pdisks:$num_pdisks external_storage_systems:$num_external_controllers consistency_groups:$consistency_group_count metro_mirrors:$metro_mirror_count global_mirrors:$global_mirror_count vdisk_read_latency:${vdisk_r_ms}ms vdisk_write_latency:${vdisk_w_ms}ms\n";
-   print "$output_message";                                             #print output to screen
-   print_to_outputfile;                                                 #call subroutine to confirm the output is in the $outputfile used for subsequent script runs
-   exit $OK;                                                            #exit script
+   #
+   # Much of the text of the output will be the same.  Put the common stuff in a variable so we can simplify the outputs
+   $common_output_data = "cluster_name:$cluster_name cpu_util:$cpu_pc\% config_node:$config_node node_count:$nodecount code_level:$code_level smtp:$smtp_ipaddr ntp:$ntp_ipaddr vdisks:$num_vdisks mdisks:$num_mdisks pdisks:$num_pdisks external_storage_systems:$num_external_controllers consistency_groups:$consistency_group_count metro_mirrors:$metro_mirror_count global_mirrors:$global_mirror_count vdisk_read_latency:${vdisk_r_ms}ms vdisk_write_latency:${vdisk_w_ms}ms  ";
+   #
+   # Check for problems
+   #
+   if ( $error_count > 0 ) { 
+      $common_output_data = "$error_text $common_output_data";
+   }
+   #
+   # If there are multiple errors, remind the sysadmin that there is more than one error to investigate.
+   #
+   if ( $error_count > 1 ) { 
+      $common_output_data = "Multiple problems detected. $common_output_data";
+   }
+   #
+   # Decide if the alert should have WARN or CRITICAL status
+   #
+   if ( $error_count > 0 ) {
+      if ( $error_text =~ /CRITICAL/ ) {
+         $output_message = "$CHECK_NAME CRITICAL.  $common_output_data | $perf_data \n";
+         print "$output_message";                                             #print output to screen
+         print_to_outputfile;                                                 #call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         exit $CRITICAL;                                                            #exit script
+      }
+      if ( $error_text =~ /WARN/ ) {
+         $output_message = "$CHECK_NAME WARN.  $common_output_data | $perf_data \n";
+         print "$output_message";                                             #print output to screen
+         print_to_outputfile;                                                 #call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+         exit $WARN;                                                            #exit script
+      }
+   }
+   #
+   # We only get this far if there are no problems
+   #
+   if ( $error_count == 0 ) {
+      $output_message = "$CHECK_NAME OK.  $common_output_data | $perf_data \n";
+      print "$output_message";                                             #print output to screen
+      print_to_outputfile;                                                 #call subroutine to confirm the output is in the $outputfile used for subsequent script runs
+      exit $OK;                                                            #exit script
+   }
 }
 
 
@@ -2022,6 +2077,6 @@ generate_vdisk_report;							#generate an HTML report showing all the vdisk name
 check_firmware;								#look for obsolete or buggy firmware versions
 check_perf_stats;							#check assorted performance stats (cpu,cache,latency)
 check_error_logs;							#look for entries in the error logs
-all_clear;								#only get this far if there are no problems
+print_output;								#print OK|WARN|CRITICA|UNKNOWN status
 
 
