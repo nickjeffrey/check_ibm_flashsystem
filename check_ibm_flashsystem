@@ -55,7 +55,7 @@
 #  2022/05/06	njeffrey	Tweak regex in check_mdisks subroutine
 #  2022/05/06	njeffrey	Code refactoring to save all errors in a variable and report on multiple errors, instead of just alerting on the first error found
 #  2022/05/06	njeffrey	Add more error messages to check_error_log subroutine 
-#  2022/05/06	njeffrey	Change $CHECK_NAME from "SVC checks" to "FlashSystem checks" to better reflect current product branding
+#  2022/05/06	njeffrey	Change $CHECK_NAME from "SVC checks" to "FlashSystem health" to better reflect current product branding
 
 
 
@@ -209,7 +209,7 @@ $nslookup_status          = "";					#flag for checking to see if nslookup test s
 $ping                     = "/bin/ping";                        #location of binary on nagios server
 $ping_status              = "";                                 #flag for checking to see if ping     test succeeds
 $verbose                  = "no";				#for debugging (yes=show more print output) 
-$CHECK_NAME               = "FlashSystem checks"; 		#name of nagios check
+$CHECK_NAME               = "FlashSystem health"; 		#name of nagios check
 $ssh_status               = "";					#status of ssh    daemon
 $metro_mirror_count       = 0;					#number of metro mirrors
 $global_mirror_count      = 0;					#number of global mirrors
