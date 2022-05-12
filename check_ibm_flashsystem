@@ -1975,8 +1975,7 @@ sub print_output {
    #
    print "running print_output subroutine \n" if ($verbose eq "yes");
    #
-   # This check does not generate nagios performance data, so the output will be null.
-   # If performance data is added in the future, 
+   # Nagios performance data 
    # The format is:  label=value[UOM];[warn];[crit];[min];[max]
    # On the "label=value" section is required.  The warn|crit|min|max entries are optional.
    # You can have multiple items of perf data, just separate each section with a space
