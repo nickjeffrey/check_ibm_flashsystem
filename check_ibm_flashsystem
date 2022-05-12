@@ -1981,7 +1981,7 @@ sub print_output {
    # On the "label=value" section is required.  The warn|crit|min|max entries are optional.
    # You can have multiple items of perf data, just separate each section with a space
    # UOM is Units Of Measurement.    Can be s=seconds B=bytes MB=megabytes %=percent c=counter
-   $perf_data = "cpu_util=$cpu_pc\%;;;; vdisk_read_latency_ms=$vdisk_r_ms;;;; vdisk_write_latency_ms=$vdisk_s_ms";
+   $perf_data = "cpu_util=$cpu_pc\%;;;; vdisk_read_latency_ms=$vdisk_r_ms;;;; vdisk_write_latency_ms=$vdisk_w_ms";
    #
    # figure out the name of the cluster so we can report it in the output message
    foreach $key (sort keys %clusters) {
