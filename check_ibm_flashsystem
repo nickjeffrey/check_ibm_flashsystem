@@ -56,7 +56,6 @@
 #  2022/05/06	njeffrey	Code refactoring to save all errors in a variable and report on multiple errors, instead of just alerting on the first error found
 #  2022/05/06	njeffrey	Add more error messages to check_error_log subroutine 
 #  2022/05/06	njeffrey	Change $CHECK_NAME from "SVC checks" to "FlashSystem health" to better reflect current product branding
-#  2022/05/06	njeffrey	Add nagios performance data to output
 
 
 
@@ -1975,12 +1974,13 @@ sub print_output {
    #
    print "running print_output subroutine \n" if ($verbose eq "yes");
    #
-   # Nagios performance data 
+   # This check does not generate nagios performance data, so the output will be null.
+   # If performance data is added in the future, 
    # The format is:  label=value[UOM];[warn];[crit];[min];[max]
    # On the "label=value" section is required.  The warn|crit|min|max entries are optional.
    # You can have multiple items of perf data, just separate each section with a space
    # UOM is Units Of Measurement.    Can be s=seconds B=bytes MB=megabytes %=percent c=counter
-   $perf_data = "cpu_util=$cpu_pc\%;;;; vdisk_read_latency_ms=$vdisk_r_ms;;;; vdisk_write_latency_ms=$vdisk_w_ms";
+   $perf_data = "";
    #
    # figure out the name of the cluster so we can report it in the output message
    foreach $key (sort keys %clusters) {
