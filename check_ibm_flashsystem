@@ -56,6 +56,8 @@
 #  2022/05/06	njeffrey	Code refactoring to save all errors in a variable and report on multiple errors, instead of just alerting on the first error found
 #  2022/05/06	njeffrey	Add more error messages to check_error_log subroutine 
 #  2022/05/06	njeffrey	Change $CHECK_NAME from "SVC checks" to "FlashSystem health" to better reflect current product branding
+#  2022/06/12	njeffrey	Remove ping check against SMTP servrs, because some SMTP servers will respond on tcp port 25, but will not respond to ping
+#  2022/06/12	njeffrey	Add performance data to output for graphing
 
 
 
@@ -849,31 +851,31 @@ sub check_email_server {
       $error_count++;											#increment the total number of problems found
       $error_text = "$error_text , WARN - Could not find a defined SMTP server for sending email alerts.  Please check the notification settings. ";
    }
-   #
-   # ping the SMTP server
-   #
-   $ping_status = "";                                                           #initialize variable
-   $cmd = "$ping -c 1 $smtp_ipaddr";						#define command to be run 
-   print "   running $cmd \n" if ($verbose eq "yes"); 
-   if( ! open( PING, "$cmd |" ) ) {
-      $error_count++;											#increment the total number of problems found
-      $error_text = "$error_text , WARN - Could not ping SMTP server $smtp_ipaddr because: $! ";
-   }                                                                            #end of if block
-   while (<PING>) {                                                             #read a line from STDIN
-      if ( (/100% packet loss/) || (/100% loss/) ) {;                           #look for timeout message
-         $ping_status = "failed";
-         print "   did not receive ping reply from $smtp_ipaddr \n" if ($verbose eq "yes");
-      }                                                                         #end of if block
-      if ( (/ 0% packet loss/) || (/ 0% loss/) ) {;                             #look for timeout message
-         $ping_status = "success";
-         print "   received ping reply from $smtp_ipaddr \n" if ($verbose eq "yes");
-      }                                                                         #end of if block
-   }                                                                            #end of while loop
-   close PING;                                                                  #close filehandle
-   if ( $ping_status eq "failed" ) {                                            #check for flag value
-      $error_count++;											#increment the total number of problems found
-      $error_text = "$error_text , WARN - No ping reply from SMTP server $smtp_ipaddr.  This means the storage system cannot send alerts or inventory via email.  Please check the email notification settings. ";
-   }                                                                            #end of if block
+   ## ping check removed 2022-06-20, some SMTP servers do not respond to ping
+   ## ping the SMTP server
+   ##
+   #$ping_status = "";                                                           #initialize variable
+   #$cmd = "$ping -c 1 $smtp_ipaddr";						#define command to be run 
+   #print "   running $cmd \n" if ($verbose eq "yes"); 
+   #if( ! open( PING, "$cmd |" ) ) {
+   #   $error_count++;											#increment the total number of problems found
+   #   $error_text = "$error_text , WARN - Could not ping SMTP server $smtp_ipaddr because: $! ";
+   #}                                                                            #end of if block
+   #while (<PING>) {                                                             #read a line from STDIN
+   #   if ( (/100% packet loss/) || (/100% loss/) ) {;                           #look for timeout message
+   #      $ping_status = "failed";
+   #      print "   did not receive ping reply from $smtp_ipaddr \n" if ($verbose eq "yes");
+   #   }                                                                         #end of if block
+   #   if ( (/ 0% packet loss/) || (/ 0% loss/) ) {;                             #look for timeout message
+   #      $ping_status = "success";
+   #      print "   received ping reply from $smtp_ipaddr \n" if ($verbose eq "yes");
+   #   }                                                                         #end of if block
+   #}                                                                            #end of while loop
+   #close PING;                                                                  #close filehandle
+   #if ( $ping_status eq "failed" ) {                                            #check for flag value
+   #   $error_count++;											#increment the total number of problems found
+   #   $error_text = "$error_text , WARN - No ping reply from SMTP server $smtp_ipaddr.  This means the storage system cannot send alerts or inventory via email.  Please check the email notification settings. ";
+   #}                                                                            #end of if block
 }                                                                               #end of subroutine
 
 
@@ -1980,7 +1982,7 @@ sub print_output {
    # On the "label=value" section is required.  The warn|crit|min|max entries are optional.
    # You can have multiple items of perf data, just separate each section with a space
    # UOM is Units Of Measurement.    Can be s=seconds B=bytes MB=megabytes %=percent c=counter
-   $perf_data = "";
+   $perf_data = "CPU_util:$cpu_pc\%;;;; vdisk_read_latency_ms:${vdisk_r_ms};;;; vdisk_write_latency_ms:${vdisk_w_ms};;;;";
    #
    # figure out the name of the cluster so we can report it in the output message
    foreach $key (sort keys %clusters) {
