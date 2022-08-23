@@ -58,6 +58,7 @@
 #  2022/05/06	njeffrey	Change $CHECK_NAME from "SVC checks" to "FlashSystem health" to better reflect current product branding
 #  2022/06/12	njeffrey	Remove ping check against SMTP servrs, because some SMTP servers will respond on tcp port 25, but will not respond to ping
 #  2022/06/12	njeffrey	Add performance data to output for graphing
+#  2022/08/23   njeffrey    Bug fix in performance data output s/:/=/ 
 
 
 
@@ -1982,7 +1983,7 @@ sub print_output {
    # On the "label=value" section is required.  The warn|crit|min|max entries are optional.
    # You can have multiple items of perf data, just separate each section with a space
    # UOM is Units Of Measurement.    Can be s=seconds B=bytes MB=megabytes %=percent c=counter
-   $perf_data = "CPU_util:$cpu_pc\%;;;; vdisk_read_latency_ms:${vdisk_r_ms};;;; vdisk_write_latency_ms:${vdisk_w_ms};;;;";
+   $perf_data = "CPU_util=$cpu_pc\%;;;; vdisk_read_latency_ms=${vdisk_r_ms};;;; vdisk_write_latency_ms=${vdisk_w_ms};;;;";
    #
    # figure out the name of the cluster so we can report it in the output message
    foreach $key (sort keys %clusters) {
