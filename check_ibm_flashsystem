@@ -58,7 +58,8 @@
 #  2022/05/06	njeffrey	Change $CHECK_NAME from "SVC checks" to "FlashSystem health" to better reflect current product branding
 #  2022/06/12	njeffrey	Remove ping check against SMTP servrs, because some SMTP servers will respond on tcp port 25, but will not respond to ping
 #  2022/06/12	njeffrey	Add performance data to output for graphing
-#  2022/08/23   njeffrey    Bug fix in performance data output s/:/=/ 
+#  2022/08/23   njeffrey    	Bug fix in performance data output s/:/=/ 
+#  2022/09/20   njeffrey    	Add check in check_error_logs subroutine for  "Power Supply Unit Input Power Failed"
 
 
 
@@ -1938,6 +1939,12 @@ sub check_error_logs {
          $error_count++;								#increment the total number of problems found
          unless ( $error_text =~ /Automatic recovery of offline node failed/ ) {	#do not insert duplicate messages
             $error_text = "$error_text , CRITICAL - Automatic recovery of offline node failed  ";
+         }										#end of unless block
+      }											#end of if block
+      if ( /Power Supply Unit Input Power Failed/ ) {
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Power Supply Unit Input Power Failed/ ) {	#do not insert duplicate messages
+            $error_text = "$error_text , CRITICAL - Power Supply Unit Input Power Failed  ";
          }										#end of unless block
       }											#end of if block
       #
