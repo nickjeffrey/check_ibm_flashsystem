@@ -25,6 +25,7 @@ This script runs on a nagios server and connects to an IBM SVC / Storwize / Spec
 - high CPU utilization
 - high read / write latency
 - contents of error logs
+- power supply status
   
   
  
