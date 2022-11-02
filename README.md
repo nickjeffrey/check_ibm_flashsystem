@@ -12,6 +12,7 @@ This script runs on a nagios server and connects to an IBM SVC / Storwize / Spec
 - controller health
 - SMTP call home configuration
 - NTP time sync
+- mdiskgrp status (check for degraded/offline/full mdiskgrp storage pools)
 - mdisk status (check for degraded mdisks)
 - vdisk status (check for offline vdisks)
 - pdisk status (check for offline physical disks)
