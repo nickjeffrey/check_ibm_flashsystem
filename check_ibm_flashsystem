@@ -60,6 +60,7 @@
 #  2022/06/12	njeffrey	Add performance data to output for graphing
 #  2022/08/23   njeffrey    	Bug fix in performance data output s/:/=/ 
 #  2022/09/20   njeffrey    	Add check in check_error_logs subroutine for  "Power Supply Unit Input Power Failed"
+#  2022/11/02   njeffrey    	Add check_mdiskgrps subroutine
 
 
 
@@ -196,10 +197,10 @@ my ($ping,$ping_status);
 my ($smtp_ipaddr,$smtp_port,$ntp_ipaddr);
 my ($opt_h,$opt_v);
 my ($OK,$WARN,$CRITICAL,$UNKNOWN,$CHECK_NAME);
-my (%nodes,%clusters,%mirrors,%consistencygroups,%vdisks,%controllers);
+my (%nodes,%clusters,%mirrors,%consistencygroups,%vdisks,%controllers,%mdiskgrps);
 my ($metro_mirror_count,$global_mirror_count,$consistency_group_count,$key);
 my ($config_node,$nodecount,@lines,$cur_date,$mirror_report,$vdisk_report,$code_level,$cpu_pc,$cluster_name);
-my ($num_vdisks,$num_pdisks,$num_mdisks,$restart_stopped_mirrors,$write_cache_pc,$total_cache_pc);
+my ($num_vdisks,$num_pdisks,$num_mdisks,$num_mdiskgrps,$restart_stopped_mirrors,$write_cache_pc,$total_cache_pc);
 my ($vdisk_r_ms,$vdisk_w_ms,%slots,$num_slots,$num_external_controllers);
 my ($epoch,$dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks);
 my ($send_email,$email_to,$email_subject);
@@ -225,6 +226,7 @@ $code_level               = "";					#the version of code running on the SVC / V7
 $cpu_pc                   = "unknown";				#CPU percent utilized on SVC cluster (averaged across all nodes)
 $num_vdisks               = "0";				#number of vdisks (virtual disks, aka LUNs, aka volumes)
 $num_mdisks               = "0";				#number of mdisks (managed disks, aka raid arrays)
+$num_mdiskgrps            = "0";				#number of mdiskgrps (managed disk groups, aka storage pools)
 $num_pdisks               = "0";				#number of internal pdisks (physical disk drives) - Storwize only, does not apply to SVC
 $num_external_controllers = 0;					#number of external storage subsystems virtualized by the SVC/V7000
 $restart_stopped_mirrors  = "yes";				#yes/no flag to restart mirrors if they stop
@@ -989,6 +991,105 @@ sub check_controllers {
       }                                                         #end of if block
    }								#end of foreach block
 }								#end of subroutine
+
+
+
+
+sub check_mdiskgrps {
+   #
+   print "running check_mdiskgrps subroutine \n" if ($verbose eq "yes");
+   #
+   # NOTE: if one of the canisters is offline, *ALL* of the mdiskgrps will show up as degraded, because every mdisk will have a single point of failure.
+   #
+   # This command may generate multiple lines of ouput.  One line for each mdisk. An example is shown below:
+   #IBM_FlashSystem:FS7200prod> lsmdiskgrp -delim :
+   #id:name:status:mdisk_count:vdisk_count:capacity:extent_size:free_capacity:virtual_capacity:used_capacity:real_capacity:overallocation:warning:easy_tier:easy_tier_status:compression_active:compression_virtual_capacity:compression_compressed_capacity:compression_uncompressed_capacity:parent_mdisk_grp_id:parent_mdisk_grp_name:child_mdisk_grp_count:child_mdisk_grp_capacity:type:encrypt:owner_type:owner_id:owner_name:site_id:site_name:data_reduction:used_capacity_before_reduction:used_capacity_after_reduction:overhead_capacity:deduplication_capacity_saving:reclaimable_capacity:easy_tier_fcm_over_allocation_max:provisioning_policy_id:provisioning_policy_name
+   #0:Pool0:online:1:52:496.91TB:1024:75.12TB:291.79TB:291.79TB:291.79TB:58:80:auto:balanced:no:0.00MB:0.00MB:0.00MB:0:Pool0:1:130.00TB:parent:yes:none:::::no:0.00MB:0.00MB:0.00MB:0.00MB:0.00MB:100%::
+   #1:SKY-Pool:online:0:398:130.00TB:1024:18.29TB:3.66PB:111.46TB:111.50TB:2880:80:auto:balanced:no:0.00MB:0.00MB:0.00MB:0:Pool0:0:0.00MB:child_thick:yes:none:::::no:0.00MB:0.00MB:0.00MB:0.00MB:0.00MB:100%::
+   #
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsmdiskgrp -delim :";		#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   open(SSH,"$cmd |") or die "$!\n";
+   while (<SSH>) {
+      next if ( /^id:name/ ); 							#skip header row
+      if ( /^([0-9]+):([a-zA-Z0-9_\-\.]+):([a-z]+):([0-9]+):([0-9]+):([0-9A-Z\.]+):([0-9]+):([0-9A-Z\.]+):/ ) {		#find each mdiskgrp and get the status
+         $mdiskgrps{$1}{id}            = $1;					#use numeric id of mdiskgrp as hash index
+         $mdiskgrps{$1}{name}          = $2;					#save value to hash
+         $mdiskgrps{$1}{status}        = $3;					#save value to hash
+         $mdiskgrps{$1}{mdisk_count}   = $4;					#save value to hash
+         $mdiskgrps{$1}{vdisk_count}   = $5;					#save value to hash
+         $mdiskgrps{$1}{capacity}      = $6;					#save value to hash
+         $mdiskgrps{$1}{extent_size}   = $7;					#save value to hash
+         $mdiskgrps{$1}{free_capacity} = $8;					#save value to hash
+      }										#end of if block 
+   }	  									#end of while loop
+   close SSH; 									#close filehandle
+   #
+   # At this point, we have the details of each mdiskgrp.  Now we can check for problems.
+   #
+   foreach $key (keys %mdiskgrps) {
+      next unless ( $mdiskgrps{$key}{name} );             			#skip any empty hash elements
+      #
+      # The capacity and free_capacity values have a trailing unit of GB/TB/PS.  Let's remove the unit and convert to TB.
+      #
+      if ( $mdiskgrps{$key}{capacity}  =~ /([0-9]+\.[0-9]+)GB/ ) {		#convert GB to TB
+         $mdiskgrps{$key}{capacity_tb} = $1/1024;				#convert to number by removing GB unit and divide by 1024
+         $mdiskgrps{$key}{capacity_tb} = sprintf("%.1f", $mdiskgrps{$key}{capacity_tb}); #truncate to 1 decimal place
+      }										#end of if block
+      if ( $mdiskgrps{$key}{capacity}  =~ /([0-9]+\.[0-9]+)TB/ ) {		#convert TB to TB
+         $mdiskgrps{$key}{capacity_tb} = $1*1;					#convert to number by removing TB unit
+         $mdiskgrps{$key}{capacity_tb} = sprintf("%.1f", $mdiskgrps{$key}{capacity_tb}); #truncate to 1 decimal place
+      }										#end of if block
+      if ( $mdiskgrps{$key}{capacity}  =~ /([0-9]+\.[0-9]+)PB/ ) {		#convert PB to TB
+         $mdiskgrps{$key}{capacity_tb} = $1*1024;				#convert to number by removing PB unit and multiply by 1024
+         $mdiskgrps{$key}{capacity_tb} = sprintf("%.1f", $mdiskgrps{$key}{capacity_tb}); #truncate to 1 decimal place
+      }										#end of if block
+      # 
+      if ( $mdiskgrps{$key}{free_capacity}  =~ /([0-9]+\.[0-9]+)GB/ ) {		#convert GB to TB
+         $mdiskgrps{$key}{free_capacity_tb} = $1/1024;				#convert to number by removing GB unit and divide by 1024
+         $mdiskgrps{$key}{free_capacity_tb} = sprintf("%.1f", $mdiskgrps{$key}{free_capacity_tb}); #truncate to 1 decimal place
+      }										#end of if block
+      if ( $mdiskgrps{$key}{free_capacity}  =~ /([0-9]+\.[0-9]+)TB/ ) {		#convert TB to TB
+         $mdiskgrps{$key}{free_capacity_tb} = $1*1;					#convert to number by removing TB unit
+         $mdiskgrps{$key}{free_capacity_tb} = sprintf("%.1f", $mdiskgrps{$key}{free_capacity_tb}); #truncate to 1 decimal place
+      }										#end of if block
+      if ( $mdiskgrps{$key}{free_capacity}  =~ /([0-9]+\.[0-9]+)PB/ ) {		#convert PB to TB
+         $mdiskgrps{$key}{free_capacity_tb} = $1*1024;				#convert to number by removing PB unit and multiply by 1024
+         $mdiskgrps{$key}{free_capacity_tb} = sprintf("%.1f", $mdiskgrps{$key}{free_capacity_tb}); #truncate to 1 decimal place
+      }										#end of if block
+      #
+      # Calculate the percentage of used and free space in each mdiskgrp 
+      #
+      $mdiskgrps{$key}{used_capacity_tb}  = $mdiskgrps{$key}{capacity_tb} - $mdiskgrps{$key}{free_capacity_tb}; 
+      $mdiskgrps{$key}{used_capacity_pct} = $mdiskgrps{$key}{used_capacity_tb} / $mdiskgrps{$key}{capacity_tb} * 100; 
+      $mdiskgrps{$key}{free_capacity_pct} = 100 - $mdiskgrps{$key}{used_capacity_pct}; 
+      $mdiskgrps{$key}{free_capacity_pct} = sprintf("%.0f", $mdiskgrps{$key}{free_capacity_pct}); #truncate to 0 decimal places
+      $mdiskgrps{$key}{used_capacity_pct} = sprintf("%.0f", $mdiskgrps{$key}{used_capacity_pct}); #truncate to 0 decimal places
+      #
+      # Check to see if any of the mdiskgrps are out of space
+      #
+      if ( $mdiskgrps{$key}{used_capacity_pct} > 90 ) {
+            $error_count++;							#increment the total number of problems found
+            $error_text  = "$error_text , WARNING - mdiskgrp with id=$mdiskgrps{$key}{id} name=$mdiskgrps{$key}{name} is $mdiskgrps{$key}{used_capacity_pct}\% full. ";
+      }										#end of if block
+      #
+      # Check to see if any of the mdiskgrps are in a degraded state
+      #
+      if ( $mdiskgrps{$key}{status} eq "degraded" ) {
+            $error_count++;							#increment the total number of problems found
+            $error_text  = "$error_text , WARNING - mdiskgrp with id=$mdiskgrps{$key}{id} name=$mdiskgrps{$key}{name} is $mdiskgrps{$key}{status}. ";
+      }										#end of if block
+      if ( $mdiskgrps{$key}{status} eq "offline" ) {
+            $error_count++;							#increment the total number of problems found
+            $error_text  = "$error_text , CRITICAL - mdiskgrp with id=$mdiskgrps{$key}{id} name=$mdiskgrps{$key}{name} is $mdiskgrps{$key}{status}. ";
+      }										#end of if block
+      #
+      # generate verbose output for debugging
+      #
+      print "   mdiskgrp_id:$mdiskgrps{$key}{id} mdiskgrp_name:$mdiskgrps{$key}{name} capacity_tb:$mdiskgrps{$key}{capacity_tb} used_capacity_tb:$mdiskgrps{$key}{used_capacity_tb} free_capacity_tb:$mdiskgrps{$key}{free_capacity_tb} used_capacity_pct:$mdiskgrps{$key}{used_capacity_pct}\% free_capacity_pct:$mdiskgrps{$key}{free_capacity_pct}\% \n" if ($verbose eq "yes");
+   }										#end of foreach loop
+}										#end of subroutine
 
 
 
@@ -2017,6 +2118,12 @@ sub print_output {
    # Much of the text of the output will be the same.  Put the common stuff in a variable so we can simplify the outputs
    $common_output_data = "cluster_name:$cluster_name cpu_util:$cpu_pc\% config_node:$config_node node_count:$nodecount code_level:$code_level smtp:$smtp_ipaddr ntp:$ntp_ipaddr vdisks:$num_vdisks mdisks:$num_mdisks pdisks:$num_pdisks external_storage_systems:$num_external_controllers consistency_groups:$consistency_group_count metro_mirrors:$metro_mirror_count global_mirrors:$global_mirror_count vdisk_read_latency:${vdisk_r_ms}ms vdisk_write_latency:${vdisk_w_ms}ms  ";
    #
+   # Add the storage pool utilization to the $common_output_data
+   #
+   foreach $key (sort keys %mdiskgrps) {
+      $common_output_data = "$common_output_data mdiskgrp_space_used_$mdiskgrps{$key}{name}:$mdiskgrps{$key}{used_capacity_tb}\/$mdiskgrps{$key}{capacity_tb}TB\($mdiskgrps{$key}{used_capacity_pct}\%\) ";
+   }                                                                    #end of foreach loop
+   #
    # Check for problems
    #
    if ( $error_count > 0 ) { 
@@ -2075,6 +2182,7 @@ check_node_status;							#confirm all the storage controller nodes are online
 check_email_server;							#confirm the SMTP server used for email alerts responds to ping
 check_ntp_server;							#confirm the NTP  server used for time sync    responds to ping
 check_controllers;							#check any external disk subsystems
+check_mdiskgrps;							#confirm all mdisk groups are online
 check_mdisks;								#confirm all mdisks are online
 check_vdisks;								#confirm all vdisks are online
 check_physical_disks;							#confirm all physical disks are only - not applicable to SVC
