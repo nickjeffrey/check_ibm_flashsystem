@@ -61,6 +61,10 @@
 #  2022/08/23   njeffrey    	Bug fix in performance data output s/:/=/ 
 #  2022/09/20   njeffrey    	Add check in check_error_logs subroutine for  "Power Supply Unit Input Power Failed"
 #  2022/11/02   njeffrey    	Add check_mdiskgrps subroutine
+#  2022/11/07   njeffrey    	Add enclosurer model and serial number to output
+#  2022/11/07   njeffrey    	Add 8.3.1.0 and 8.3.1.1 to %firmware_buggy hash
+#  2022/11/07   njeffrey    	Add 8.2.x to %firmware_obsolete hash
+#
 
 
 
@@ -201,7 +205,7 @@ my (%nodes,%clusters,%mirrors,%consistencygroups,%vdisks,%controllers,%mdiskgrps
 my ($metro_mirror_count,$global_mirror_count,$consistency_group_count,$key);
 my ($config_node,$nodecount,@lines,$cur_date,$mirror_report,$vdisk_report,$code_level,$cpu_pc,$cluster_name);
 my ($num_vdisks,$num_pdisks,$num_mdisks,$num_mdiskgrps,$restart_stopped_mirrors,$write_cache_pc,$total_cache_pc);
-my ($vdisk_r_ms,$vdisk_w_ms,%slots,$num_slots,$num_external_controllers);
+my ($vdisk_r_ms,$vdisk_w_ms,%enclosures,%slots,$num_slots,$num_external_controllers);
 my ($epoch,$dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,$atime,$mtime,$ctime,$blksize,$blocks);
 my ($send_email,$email_to,$email_subject);
 #
@@ -1230,6 +1234,42 @@ sub check_physical_disks {
 }								#end of subroutine
 
 
+#xxxx
+sub check_model_serial {
+   #
+   print "running check_model_serial subroutine \n" if ($verbose eq "yes");
+   #
+
+   # This command may generate multiple lines of ouput.  One line for each control and expansion enclosure 
+   #IBM_Storwize:V7000-COLO:nagios>svcinfo lsenclosure
+   #id status   type      managed IO_group_id IO_group_name product_MTM serial_number total_canisters online_canisters total_PSUs online_PSUs drive_slots total_fan_modules online_fan_modules total_sems online_sems
+   #1  degraded control   yes     0           io_grp0       2076-324    78RFWKM       2               2                2          2           24          0                 0                  0          0
+   #2  degraded expansion yes     0           io_grp0       2076-224    78RFTC4       2               2                2          2           24          0                 0                  0          0
+   #3  online   control   yes     1           io_grp1       2076-524    78210LP       2               2                2          2           24          2                 2                  0          0
+   #4  online   control   yes     2           io_grp2       2076-524    7821PAX       2               2                2          2           24          2                 2                  0          0
+   #5  online   expansion yes     2           io_grp2       2076-24F    78250ZN       2               2                2          2           24          0                 0                  0          0
+   #
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lsenclosure -delim :";	#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   open(SSH,"$cmd |") or die "$!\n"; 					#open filehandle using command output
+   while (<SSH>) { 							#read a line from the filehandle
+      next if ( /^id/ ); 						#skip header row
+      if ( /^([0-9]+):([a-z]+):([a-z]+):([a-z]+):([0-9]+):([a-z0-9_]+):([a-zA-Z0-9\-]+):([a-zA-Z0-9\_]+):/ ){ 	#find each slot
+         $enclosures{$1}{id}            = $1; 				#assign value to hash
+         $enclosures{$1}{status}        = $2; 				#assign value to hash
+         $enclosures{$1}{type}          = $3; 				#assign value to hash
+         $enclosures{$1}{managed}       = $4; 				#assign value to hash
+         $enclosures{$1}{IO_group_id}   = $5; 				#assign value to hash
+         $enclosures{$1}{IO_group_name} = $6; 				#assign value to hash
+         $enclosures{$1}{product_MTM}   = $7; 				#assign value to hash
+         $enclosures{$1}{serial_number} = $8; 				#assign value to hash
+         print "      enclosure id:$enclosures{$1}{id} status:$enclosures{$1}{type} model:$enclosures{$1}{product_MTM} serial:$enclosures{$1}{serial_number} \n" if ($verbose eq "yes");
+      }									#end of if block 
+   }	  								#end of while loop
+   close SSH; 								#close filehandle
+}									#end of subroutine
+
 
 
 sub check_slots {
@@ -1756,6 +1796,8 @@ sub check_firmware {
                           "7.6.0.4"  =>  "is known to be buggy, and should be updated.  Please refer to  http://www-01.ibm.com/support/docview.wss?uid=ssg1S1005863&myns=s033&mynp=OCSTPVGU&mync=E&cm_sp=s033-_-OCSTPVGU-_-E" ,
                           "7.6.1.1"  =>  "is known to be buggy, and should be updated.  Please refer to  http://www-01.ibm.com/support/docview.wss?uid=ssg1S1005863&myns=s033&mynp=OCSTPVGU&mync=E&cm_sp=s033-_-OCSTPVGU-_-E" ,
                           "7.6.1.3"  =>  "is known to be buggy, and should be updated.  Please refer to  http://www-01.ibm.com/support/docview.wss?uid=ssg1S1005863&myns=s033&mynp=OCSTPVGU&mync=E&cm_sp=s033-_-OCSTPVGU-_-E" ,
+                          "8.3.1.0"  =>  "is known to be buggy, and should be updated.  Please refer to document 6125061 https://www.ibm.com/support/pages/do-not-expand-distributed-raid-arrays-contain-flashcore-modules-fcms" ,
+                          "8.3.1.1"  =>  "is known to be buggy, and should be updated.  Please refer to document 6125061 https://www.ibm.com/support/pages/do-not-expand-distributed-raid-arrays-contain-flashcore-modules-fcms" ,
                         );
    # 
    #
@@ -1783,7 +1825,7 @@ sub check_firmware {
                              "7.7"  =>  "was dropped from support in Sep 2019.  Please update to a supported firmware level." , 
                             #"7.8"  =>  "was dropped from support in Dec 2022.  Please update to a supported firmware level." , 
                              "8.1"  =>  "was dropped from support in Dec 2020.  Please update to a supported firmware level." , 
-                            #"8.2"  =>  "was dropped from support in Sep 2022.  Please update to a supported firmware level." , 
+                             "8.2"  =>  "was dropped from support in Sep 2022.  Please update to a supported firmware level." , 
                             #"8.3"  =>  "was dropped from support in ??? 20??.  Please update to a supported firmware level." , 
                             #"8.4"  =>  "was dropped from support in ??? 20??.  Please update to a supported firmware level." , 
                             #"8.5"  =>  "was dropped from support in ??? 20??.  Please update to a supported firmware level." , 
@@ -2124,6 +2166,17 @@ sub print_output {
       $common_output_data = "$common_output_data mdiskgrp_space_used_$mdiskgrps{$key}{name}:$mdiskgrps{$key}{used_capacity_tb}\/$mdiskgrps{$key}{capacity_tb}TB\($mdiskgrps{$key}{used_capacity_pct}\%\) ";
    }                                                                    #end of foreach loop
    #
+   # Add the model and serial number of each control and expansion enclosure $common_output_data
+   #
+   foreach $key (sort keys %enclosures) {
+      if ( $enclosures{$key}{type} eq "control" ) {
+         $common_output_data = "$common_output_data control_enclosure_model_serial:$enclosures{$key}{product_MTM}:$enclosures{$key}{serial_number} ";
+      }
+      if ( $enclosures{$key}{type} eq "expansion" ) {
+         $common_output_data = "$common_output_data expansion_enclosure_model_serial:$enclosures{$key}{product_MTM}:$enclosures{$key}{serial_number} ";
+      }
+   }                                                                    #end of foreach loop
+   #
    # Check for problems
    #
    if ( $error_count > 0 ) { 
@@ -2186,6 +2239,7 @@ check_mdiskgrps;							#confirm all mdisk groups are online
 check_mdisks;								#confirm all mdisks are online
 check_vdisks;								#confirm all vdisks are online
 check_physical_disks;							#confirm all physical disks are only - not applicable to SVC
+check_model_serial;							#check model number and serial number of each control and expansion enclosure
 check_slots;								#check each drive slot for errors
 check_fc_consistency_group_status;					#check flash  copy consistency groups
 check_rc_consistency_group_status;					#check remote copy consistency groups
