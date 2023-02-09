@@ -203,6 +203,7 @@ my ($smtp_ipaddr,$smtp_port,$ntp_ipaddr);
 my ($opt_h,$opt_v);
 my ($OK,$WARN,$CRITICAL,$UNKNOWN,$CHECK_NAME);
 my (%nodes,%clusters,%mirrors,%consistencygroups,%vdisks,%controllers,%mdiskgrps,%hosts);
+my ($hosts_active,$hosts_degraded);
 my ($metro_mirror_count,$global_mirror_count,$consistency_group_count,$key);
 my ($config_node,$nodecount,@lines,$cur_date,$mirror_report,$vdisk_report,$code_level,$cpu_pc,$cluster_name);
 my ($num_vdisks,$num_pdisks,$num_mdisks,$num_mdiskgrps,$restart_stopped_mirrors,$write_cache_pc,$total_cache_pc);
@@ -244,6 +245,8 @@ $degraded_mdisk_count     = 0;					#initialize counter variable
 $degraded_mdisk_list      = "";					#hold list of mdisk names 
 $degraded_vdisk_count     = 0;					#initialize counter variable
 $degraded_vdisk_list      = "";					#hold list of vdisk names 
+$hosts_active             = 0; 					#hosts attached via Fibre Channel and/or iSCSI
+$hosts_degraded           = 0;					#hosts attached via Fibre Channel and/or iSCSI
 #
 # Nagios return codes
 #
@@ -1375,6 +1378,7 @@ sub check_for_degraded_hosts {
    # 1  MyServ2  2          2           degraded                                                     scsi
    # 2  MyServ3  2          2           offline                                                      scsi
    # 3  MyServ4  2          2           inactive                                                     scsi
+   # 4  MyServ5  2          2           online      <--- "online" and "active" are equivalent, differs by firmware level
    #
    # Sample output delimited with : to make regex easier
    # IBM_FlashSystem>lshost -delim :
@@ -1383,6 +1387,7 @@ sub check_for_degraded_hosts {
    # 1:MyServ2:2:2:degraded:::::scsi::
    # 2:MyServ3:2:2:offline:::::scsi::
    # 3:MyServ4:2:2:inactive:::::scsi::
+   # 4:MyServ5:2:2:online:::::scsi::
    #
    $cmd = "$ssh $ssh_userid\@$host svcinfo lshost -delim :";		#define command to be run 
    print "   running $cmd \n" if ($verbose eq "yes"); 
@@ -2211,8 +2216,6 @@ sub print_output {
    #
    #
    # figure out the status of the attached hosts (active,degraded)
-   my $hosts_active   = 0;
-   my $hosts_degraded = 0;
    foreach $key (sort keys %hosts) {
       $hosts_active++   if ( $hosts{$key}{status} eq "active"   );
       $hosts_degraded++ if ( $hosts{$key}{status} eq "degraded" );
