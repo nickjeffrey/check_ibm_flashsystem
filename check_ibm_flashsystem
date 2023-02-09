@@ -64,6 +64,7 @@
 #  2022/11/07   njeffrey    	Add enclosurer model and serial number to output
 #  2022/11/07   njeffrey    	Add 8.3.1.0 and 8.3.1.1 to %firmware_buggy hash
 #  2022/11/07   njeffrey    	Add 8.2.x to %firmware_obsolete hash
+#  2023/02/09   njeffrey    	Add check_for_degraded_hosts subroutine
 #
 
 
@@ -201,7 +202,7 @@ my ($ping,$ping_status);
 my ($smtp_ipaddr,$smtp_port,$ntp_ipaddr);
 my ($opt_h,$opt_v);
 my ($OK,$WARN,$CRITICAL,$UNKNOWN,$CHECK_NAME);
-my (%nodes,%clusters,%mirrors,%consistencygroups,%vdisks,%controllers,%mdiskgrps);
+my (%nodes,%clusters,%mirrors,%consistencygroups,%vdisks,%controllers,%mdiskgrps,%hosts);
 my ($metro_mirror_count,$global_mirror_count,$consistency_group_count,$key);
 my ($config_node,$nodecount,@lines,$cur_date,$mirror_report,$vdisk_report,$code_level,$cpu_pc,$cluster_name);
 my ($num_vdisks,$num_pdisks,$num_mdisks,$num_mdiskgrps,$restart_stopped_mirrors,$write_cache_pc,$total_cache_pc);
@@ -676,27 +677,27 @@ sub check_cluster_status {
       #
       unless ( $clusters{$key}{cluster_ntp_IP_address} ) {
          $error_count++;											#increment the total number of problems found
-         $error_text = "$error_text , SVC cluster $clusters{$key}{name} is not configured to sync its time against an NTP server.  Login to the web interface and click Settings, Advanced, Date and Time.";
+         $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to sync its time against an NTP server.  Login to the web interface and click Settings, Advanced, Date and Time.";
       }														#end of if block
       unless ( $clusters{$key}{email_contact} ) {								#this is the name of the email contact
          $error_count++;											#increment the total number of problems found
-         $error_text = "$error_text , SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email. ";
+         $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email. ";
       }														#end of if block
       unless ( $clusters{$key}{email_reply} ) {									#this is the email address of the email contact
          $error_count++;											#increment the total number of problems found
-         $error_text = "$error_text , SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email. ";
+         $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email. ";
       }														#end of if block
       unless ( $clusters{$key}{email_state} eq "running" ) {							#this tells us if the email notifications are active
          $error_count++;											#increment the total number of problems found
-         $error_text = "$error_text , SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email.  ";
+         $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email.  ";
       }														#end of if block
       if ( $clusters{$key}{inventory_mail_interval} == 0 ) {							#this tells how frequently inventory details are emailed to IBM support
          $error_count++;											#increment the total number of problems found
-         $error_text = "$error_text , SVC cluster $clusters{$key}{name} is not configured to send weekly inventory information to IBM support.  This means that IBM is unable to provide proactive notification of problems.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details.  ";
+         $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send weekly inventory information to IBM support.  This means that IBM is unable to provide proactive notification of problems.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details.  ";
       }														#end of if block
       if ( $clusters{$key}{inventory_mail_interval} > 30 ) {							#this tells how frequently inventory details are emailed to IBM support
          $error_count++;											#increment the total number of problems found
-         $error_text = "$error_text , SVC cluster $clusters{$key}{name} sends inventory information to IBM support every $clusters{$key}{inventory_mail_interval} days.  That is a long time.  Please change the value to 7 days.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details, and a box to specify the number of days between reports.  ";
+         $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} sends inventory information to IBM support every $clusters{$key}{inventory_mail_interval} days.  That is a long time.  Please change the value to 7 days.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details, and a box to specify the number of days between reports.  ";
       }														#end of if block
    }														#end of foreach loop
 }														#end of subroutine
@@ -1234,7 +1235,6 @@ sub check_physical_disks {
 }								#end of subroutine
 
 
-#xxxx
 sub check_model_serial {
    #
    print "running check_model_serial subroutine \n" if ($verbose eq "yes");
@@ -1358,6 +1358,52 @@ sub check_slots {
       }  								#end of if block
    }  									#end of foreach loop
 }									#end of subroutine
+
+
+
+
+sub check_for_degraded_hosts {
+   #
+   print "running check_for_degraded_hosts subroutine \n" if ($verbose eq "yes");
+   #
+   # This subroutine checks to see if any of the defined hosts are in a degraded or offline state, which could indicate fibre channel problems
+   #
+   # Sample output:
+   # IBM_FlashSystem>lshost
+   # id name     port_count iogrp_count status   site_id site_name host_cluster_id host_cluster_name protocol owner_id owner_name
+   # 0  MyServ1  2          2           active                                                       scsi
+   # 1  MyServ2  2          2           degraded                                                     scsi
+   # 2  MyServ3  2          2           offline                                                      scsi
+   # 3  MyServ4  2          2           inactive                                                     scsi
+   #
+   # Sample output delimited with : to make regex easier
+   # IBM_FlashSystem>lshost -delim :
+   # id:name:port_count:iogrp_count:status:site_id:site_name:host_cluster_id:host_cluster_name:protocol:owner_id:owner_name
+   # 0:MyServ1:2:2:active:::::scsi::
+   # 1:MyServ2:2:2:degraded:::::scsi::
+   # 2:MyServ3:2:2:offline:::::scsi::
+   # 3:MyServ4:2:2:inactive:::::scsi::
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lshost -delim :";		#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   open(SSH,"$cmd |") or die "$!\n";					#open filehandle using command output
+   while (<SSH>) { 							#read a line from the filehandle
+      next if ( /^id/ ); 						#skip header row
+      if ( /^([0-9]+):([a-zA-Z0-9_\-]+):([0-9]+):([0-9]+):([a-z]+):/ ){	#parse out line of ouput
+         $hosts{$1}{id}          = $1; 					#assign value to hash
+         $hosts{$1}{name}        = $2; 					#assign value to hash
+         $hosts{$1}{port_count}  = $3; 					#assign value to hash
+         $hosts{$1}{iogrp_count} = $4; 					#assign value to hash
+         $hosts{$1}{status}      = $5; 					#assign value to hash
+         print "      id:$hosts{$1}{id} name:$hosts{$1}{name} status:$hosts{$1}{status} \n" if ($verbose eq "yes");
+         $error_count++ if ($hosts{$1}{status} eq "degraded"); 		#increment the total number of problems found
+         $error_text = "$error_text , WARN - degraded host $hosts{$1}{name}.";
+      }									#end of if block 
+   }	  								#end of while loop
+   close SSH; 								#close filehandle
+}									#end of subroutine
+
+
 
 
 sub check_fc_consistency_group_status {
@@ -2045,7 +2091,13 @@ sub check_error_logs {
       if ( /Unable to connect to the SMTP \(e-mail\) server/ ) {
          $error_count++;								#increment the total number of problems found
          unless ( $error_text =~ /Unable to connect to the SMTP/ ) {			#do not insert duplicate messages
-            $error_text = "$error_text , WARN - Unable to connect to the SMTP email server for sending notifications.  Please check the date and time settings.   ";
+            $error_text = "$error_text , WARN - Unable to connect to the SMTP email server for sending notifications. Please check notification settings.  ";
+         }										#end of unless block
+      }											#end of if block
+      if ( /Unable to send e-mail to any of the configured e-mail servers/ ) {
+         $error_count++;								#increment the total number of problems found
+         unless ( $error_text =~ /Unable to send e-mail to any of the configured e-mail servers/ ) {			#do not insert duplicate messages
+            $error_text = "$error_text , WARN - Unable to send e-mail to any of the configured e-mail servers. Please check notification settings.  ";
          }										#end of unless block
       }											#end of if block
       if ( /Number of device logins reduced/ ) {
@@ -2157,8 +2209,17 @@ sub print_output {
       $consistency_group_count++;
    }                                                                    #end of foreach loop
    #
+   #
+   # figure out the status of the attached hosts (active,degraded)
+   my $hosts_active   = 0;
+   my $hosts_degraded = 0;
+   foreach $key (sort keys %hosts) {
+      $hosts_active++   if ( $hosts{$key}{status} eq "active"   );
+      $hosts_degraded++ if ( $hosts{$key}{status} eq "degraded" );
+   }                                                                    #end of foreach loop
+   #
    # Much of the text of the output will be the same.  Put the common stuff in a variable so we can simplify the outputs
-   $common_output_data = "cluster_name:$cluster_name cpu_util:$cpu_pc\% config_node:$config_node node_count:$nodecount code_level:$code_level smtp:$smtp_ipaddr ntp:$ntp_ipaddr vdisks:$num_vdisks mdisks:$num_mdisks pdisks:$num_pdisks external_storage_systems:$num_external_controllers consistency_groups:$consistency_group_count metro_mirrors:$metro_mirror_count global_mirrors:$global_mirror_count vdisk_read_latency:${vdisk_r_ms}ms vdisk_write_latency:${vdisk_w_ms}ms  ";
+   $common_output_data = "cluster_name:$cluster_name cpu_util:$cpu_pc\% config_node:$config_node node_count:$nodecount code_level:$code_level smtp:$smtp_ipaddr ntp:$ntp_ipaddr vdisks:$num_vdisks mdisks:$num_mdisks pdisks:$num_pdisks external_storage_systems:$num_external_controllers consistency_groups:$consistency_group_count metro_mirrors:$metro_mirror_count global_mirrors:$global_mirror_count vdisk_read_latency:${vdisk_r_ms}ms vdisk_write_latency:${vdisk_w_ms}ms hosts_active:$hosts_active hosts_degraded:$hosts_degraded ";
    #
    # Add the storage pool utilization to the $common_output_data
    #
@@ -2241,6 +2302,7 @@ check_vdisks;								#confirm all vdisks are online
 check_physical_disks;							#confirm all physical disks are only - not applicable to SVC
 check_model_serial;							#check model number and serial number of each control and expansion enclosure
 check_slots;								#check each drive slot for errors
+check_for_degraded_hosts; 						#check status of attached hostss
 check_fc_consistency_group_status;					#check flash  copy consistency groups
 check_rc_consistency_group_status;					#check remote copy consistency groups
 get_mirror_status; 							#check the state of the site-to-site disk mirrors
