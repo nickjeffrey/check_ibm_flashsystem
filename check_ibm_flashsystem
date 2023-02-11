@@ -2218,6 +2218,7 @@ sub print_output {
    # figure out the status of the attached hosts (active,degraded)
    foreach $key (sort keys %hosts) {
       $hosts_active++   if ( $hosts{$key}{status} eq "active"   );
+      $hosts_active++   if ( $hosts{$key}{status} eq "online"   );
       $hosts_degraded++ if ( $hosts{$key}{status} eq "degraded" );
    }                                                                    #end of foreach loop
    #
