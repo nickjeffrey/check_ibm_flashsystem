@@ -102,6 +102,7 @@ This assumes that you already have ssh key pairs configured.
            }
 
 Create a section similar to the following in the commands.cfg file on the nagios server:
+
         # 'check_ibm_flashsystem' command definition
        define command {
               command_name    check_ibm_flashsystem
