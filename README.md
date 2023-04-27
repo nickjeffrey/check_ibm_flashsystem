@@ -98,8 +98,16 @@ This assumes that you already have ssh key pairs configured.
            use                             generic-24x7-service
            hostgroup_name                  all_ibm_flashsystem
            service_description             IBM FlashSystem
-           check_command                   check_by_ssh!"/usr/local/nagios/libexec/check_ibm_flashsystem"
+           check_command                   check_ibm_flashsystem
            }
+
+Create a section similar to the following in the commands.cfg file on the nagios server:
+        # 'check_ibm_flashsystem' command definition
+       define command {
+              command_name    check_ibm_flashsystem
+              command_line    $USER1$/check_ibm_flashsystem $HOSTADDRESS$
+              }
+    
 
 If you are using the check_nrpe method, you will need a section in the services.cfg file on the nagios server that looks similar to the following.
 This assumes that you already have ssh key pairs configured.
