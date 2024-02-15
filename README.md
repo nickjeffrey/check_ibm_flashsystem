@@ -36,7 +36,7 @@ This script runs on a nagios server and connects to an IBM SVC / Storwize / Spec
 SUPPORTED OPERATING SYSTEMS
 ---------------------------
 - Tested on AIX 6.1, 7.1, 7.2
-- Tested on CentOS 7, CentOS 8, Ubuntu 20.04
+- Tested on CentOS 7/8/9, Ubuntu 20.04
 - Will likely work on any UNIX-like operating system with perl and ssh
 
 
