@@ -65,6 +65,8 @@
 #  2022/11/07   njeffrey    	Add 8.3.1.0 and 8.3.1.1 to %firmware_buggy hash
 #  2022/11/07   njeffrey    	Add 8.2.x to %firmware_obsolete hash
 #  2023/02/09   njeffrey    	Add check_for_degraded_hosts subroutine
+#  2024/02/14   njeffrey    	Update regex match for cluster_ntp_IP_address to include hostnames instead of just IP addresses
+#  2024/02/14   njeffrey    	Add subroutine check_cloudcallhome
 #
 
 
@@ -202,7 +204,7 @@ my ($ping,$ping_status);
 my ($smtp_ipaddr,$smtp_port,$ntp_ipaddr);
 my ($opt_h,$opt_v);
 my ($OK,$WARN,$CRITICAL,$UNKNOWN,$CHECK_NAME);
-my (%nodes,%clusters,%mirrors,%consistencygroups,%vdisks,%controllers,%mdiskgrps,%hosts);
+my (%nodes,%clusters,%cloudcallhome,%mirrors,%consistencygroups,%vdisks,%controllers,%mdiskgrps,%hosts);
 my ($hosts_active,$hosts_degraded);
 my ($metro_mirror_count,$global_mirror_count,$consistency_group_count,$key);
 my ($config_node,$nodecount,@lines,$cur_date,$mirror_report,$vdisk_report,$code_level,$cpu_pc,$cluster_name);
@@ -578,7 +580,7 @@ sub check_cluster_status {
    #
    # This command will generate multiple lines of ouput that look similar to the following:
    #IBM_2145:svc1a:admin>svcinfo lscluster
-   #id name        UPS_serial_number WWNN             status IO_group_id IO_group_name config_node UPS_unique_id    hardware iscsi_name                                       iscsi_alias panel_name enclosure_id canister_id enclosure_serial_number
+   #id name        UPS_serial_number WWNN             status IO_group_id IO_group_name config_node UPS_unique_id    hardware iscsi_name       iscsi_alias panel_name enclosure_id canister_id enclosure_serial_number
    #1  svc1a 100007O052        500507680100B5B0 online 0           io_grp0       no          204077C0142 CF8      iqn.1986-03.com.ibm:2145.svc1a.svc1a    154883 
    #2  svc1b 100007O055        500507680100B48E online 0           io_grp0       yes         204077C0145 CF8      iqn.1986-03.com.ibm:2145.svc1a.svc1b    154841 
    #
@@ -630,7 +632,7 @@ sub check_cluster_status {
       #total_used_capacity:3.54TB
       #total_overallocation:90
       #total_vdisk_capacity:3.54TB
-      #cluster_ntp_IP_address:10.10.8.144
+      #cluster_ntp_IP_address:10.10.8.144      <--- this can be an IP address or hostname
       #cluster_isns_IP_address:
       #iscsi_auth_method:none
       #iscsi_chap_secret:
@@ -660,10 +662,10 @@ sub check_cluster_status {
       while (<SSH>) { 												#read a line from the filehandle
          $clusters{$key}{name}=$1                    if ( /^name:([a-zA-Z0-9_\-]+)/ );				#assign value to hash
          $clusters{$key}{location}=$1                if ( /^location:([a-zA-Z0-9_\-]+)/ );			#assign value to hash
-         $clusters{$key}{email_contact}=$1           if ( /^email_contact:([a-zA-Z0-9_\-]+)/ );			#assign value to hash
+         $clusters{$key}{email_contact}=$1           if ( /^email_contact:([a-zA-Z0-9_\- ]+)/ );		#assign value to hash
          $clusters{$key}{email_reply}=$1             if ( /^email_reply:([a-zA-Z0-9_\-\@]+)/ );			#assign value to hash
          $clusters{$key}{email_state}=$1             if ( /^email_state:([a-zA-Z0-9_\-]+)/ );			#assign value to hash
-         $clusters{$key}{cluster_ntp_IP_address}=$1  if ( /^cluster_ntp_IP_address:([0-9\.]+)/ );		#assign value to hash
+         $clusters{$key}{cluster_ntp_IP_address}=$1  if ( /^cluster_ntp_IP_address:([a-zA-Z0-9_\.\-]+)/ );	#assign value to hash
          $clusters{$key}{inventory_mail_interval}=$1 if ( /^inventory_mail_interval:([0-9]+)/ );		#assign value to hash
          $clusters{$key}{code_level}=$1              if ( /^code_level:([0-9\.]+)/ );				#assign value to hash
          next if ( /^id:name/ ); 										#skip header row
@@ -681,26 +683,6 @@ sub check_cluster_status {
       unless ( $clusters{$key}{cluster_ntp_IP_address} ) {
          $error_count++;											#increment the total number of problems found
          $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to sync its time against an NTP server.  Login to the web interface and click Settings, Advanced, Date and Time.";
-      }														#end of if block
-      unless ( $clusters{$key}{email_contact} ) {								#this is the name of the email contact
-         $error_count++;											#increment the total number of problems found
-         $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email. ";
-      }														#end of if block
-      unless ( $clusters{$key}{email_reply} ) {									#this is the email address of the email contact
-         $error_count++;											#increment the total number of problems found
-         $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email. ";
-      }														#end of if block
-      unless ( $clusters{$key}{email_state} eq "running" ) {							#this tells us if the email notifications are active
-         $error_count++;											#increment the total number of problems found
-         $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email.  ";
-      }														#end of if block
-      if ( $clusters{$key}{inventory_mail_interval} == 0 ) {							#this tells how frequently inventory details are emailed to IBM support
-         $error_count++;											#increment the total number of problems found
-         $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send weekly inventory information to IBM support.  This means that IBM is unable to provide proactive notification of problems.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details.  ";
-      }														#end of if block
-      if ( $clusters{$key}{inventory_mail_interval} > 30 ) {							#this tells how frequently inventory details are emailed to IBM support
-         $error_count++;											#increment the total number of problems found
-         $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} sends inventory information to IBM support every $clusters{$key}{inventory_mail_interval} days.  That is a long time.  Please change the value to 7 days.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details, and a box to specify the number of days between reports.  ";
       }														#end of if block
    }														#end of foreach loop
 }														#end of subroutine
@@ -889,6 +871,137 @@ sub check_email_server {
    #   $error_text = "$error_text , WARN - No ping reply from SMTP server $smtp_ipaddr.  This means the storage system cannot send alerts or inventory via email.  Please check the email notification settings. ";
    #}                                                                            #end of if block
 }                                                                               #end of subroutine
+
+
+
+sub check_cloudcallhome {
+   #
+   print "running check_cloudcallhome subroutine \n" if ($verbose eq "yes");
+   #
+   # The lscloudcallhome command exists in code level 8.2.x and higher
+   # Sample output:
+   # FlashSystem:nagios> lscloudcallhome
+   # status enabled                <--- shows that call home via cloud is one of: enabled disabled unsupported
+   # connection active             <--- connection state to IBM cloud call home website.  Can be: active error error_sequence_number untried
+   # error_sequence_number         <--- Indicates the error sequence number that describes the cause of the connection error
+   # last_success 240214134159     <--- this format is YYMMDDhhmmss
+   # last_failure                  <--- datestamp of last message failure in YYMMDDhhmmss format.  Will be blank if connection working for 24 hours.
+   # si_tenant_id 01eebce2-9ac0-1790-b00e-fcfaXXXXXX
+   #
+   #
+   $cloudcallhome{status}                = "unknown";						#initialize hash element to avoid undef errors
+   $cloudcallhome{connection}            = "unknown";						#initialize hash element to avoid undef errors
+   $cloudcallhome{error_sequence_number} = 0;							#initialize hash element to avoid undef errors
+   $cloudcallhome{last_success}          = 0;							#initialize hash element to avoid undef errors
+   $cloudcallhome{last_failure}          = 0;							#initialize hash element to avoid undef errors
+   $cloudcallhome{si_tenant_id}          = "unknown";						#initialize hash element to avoid undef errors
+   #
+   $cmd = "$ssh $ssh_userid\@$host svcinfo lscloudcallhome";					#define command to be run 
+   print "   running $cmd \n" if ($verbose eq "yes"); 
+   open(SSH,"$cmd 2>&1 |") or die "$!\n";
+   while (<SSH>) {
+      if ( /not a valid command line option/ ) {
+         $cloudcallhome{status} = "unsupported";							#cloudcallhome not supported on this system
+         print "   NOTE: lscloudcallhome command not supported on this system \n" if ($verbose eq "yes");
+      }												#end of if block
+      if ( /^status ([a-z]+)/ ) {
+         $cloudcallhome{status} = $1;
+         print "   found lscloudcallhome status=$cloudcallhome{status} \n" if ($verbose eq "yes");
+      }												#end of if block
+      if ( /^connection ([a-z]+)/ ) {
+         $cloudcallhome{connection} = $1;
+         print "   found lscloudcallhome connection=$cloudcallhome{status} \n" if ($verbose eq "yes");
+      }												#end of if block
+      if ( /^error_sequence_number ([a-z]+)/ ) {
+         $cloudcallhome{error_sequence_number} = $1;
+         print "   found lscloudcallhome connection=$cloudcallhome{error_sequence_number} \n" if ($verbose eq "yes");
+      }												#end of if block
+      if ( /^last_success ([0-9]+)/ ) {
+         $cloudcallhome{last_success} = $1;
+         print "   found lscloudcallhome last_success=$cloudcallhome{last_success} \n" if ($verbose eq "yes");
+      }												#end of if block
+      if ( /^last_failure ([0-9]+)/ ) {
+         $cloudcallhome{last_failure} = $1;
+         print "   found lscloudcallhome last_failure=$cloudcallhome{last_failure} \n" if ($verbose eq "yes");
+      }												#end of if block
+      if ( /^si_tenant_id ([0-9a-zA-Z\-]+)/ ) {
+         $cloudcallhome{si_tenant_id} = $1;
+         print "   found lscloudcallhome si_tenant_id=$cloudcallhome{si_tenant_id} \n" if ($verbose eq "yes");
+      }												#end of if block
+   }												#end of while loop
+   close SSH;											#close filehandle
+   #
+   # alert if cloudcallhome is disabled
+   #
+   if ($cloudcallhome{status} eq "disabled") {
+      $error_count++;										#increment the total number of problems found
+      $error_text = "$error_text , WARN - Cloud callhome is disabled, system will not notify IBM support of hardware failures.  Please check the notification settings. ";
+   }
+}                                                                               #end of subroutine
+
+
+
+sub check_all_call_home_settings {
+   #
+   print "running check_all_call_home_settings subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   # The lscloudcallhome command to perform Call home via cloud only appeared in code level 8.x, so for earlier code levels, we only have call home via email.
+   $_ = $code_level;
+   print "   code level is $_ \n" if ($verbose eq "yes");
+   s/\.//g;             #get rid of decimals (ie change 8.4.0.2 to 8402
+   print "   code level without the decimal places is $_ \n" if ($verbose eq "yes");
+   #
+   #
+   # If the code level is less than 8.x, alert if callhome via email is disabled
+   #
+   if ( $_ < 8000 ) {                                          							#only proceed if SVC code level is less than 8000
+      print "   SVC code level is $_, so the only available call home method is via email \n" if ($verbose eq "yes");
+      #
+      # We already gathered the email settings in the check_cluster_status subroutine, now check to see if we should raise an alert
+      #
+      foreach $key (sort keys %clusters) {
+         unless ( $clusters{$key}{email_contact} ) {								#this is the name of the email contact
+            $error_count++;											#increment the total number of problems found
+            $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email. ";
+         }													#end of if block
+         unless ( $clusters{$key}{email_reply} ) {								#this is the email address of the email contact
+            $error_count++;											#increment the total number of problems found
+            $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email. ";
+         }													#end of if block
+         unless ( $clusters{$key}{email_state} eq "running" ) {							#this tells us if the email notifications are active
+            $error_count++;											#increment the total number of problems found
+            $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send email alerts.  Login to the web interface and click Settings, Event Notifications, Email.  ";
+         }													#end of if block
+         if ( $clusters{$key}{inventory_mail_interval} == 0 ) {							#this tells how frequently inventory details are emailed to IBM support
+            $error_count++;											#increment the total number of problems found
+            $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} is not configured to send weekly inventory information to IBM support.  This means that IBM is unable to provide proactive notification of problems.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details.  ";
+         }													#end of if block
+         if ( $clusters{$key}{inventory_mail_interval} > 30 ) {							#this tells how frequently inventory details are emailed to IBM support
+            $error_count++;											#increment the total number of problems found
+            $error_text = "$error_text , WARN - SVC cluster $clusters{$key}{name} sends inventory information to IBM support every $clusters{$key}{inventory_mail_interval} days.  That is a long time.  Please change the value to 7 days.  Login to the web interface and click Settings, Event Notifications, Email.  There is a checkbox for enabling inventory details, and a box to specify the number of days between reports.  ";
+         }													#end of if block
+      }														#end of foreach loop
+   }														#end of if block
+   #
+   #
+   #
+   # The lscloudcallhome command to perform Call home via cloud only appeared in code level 8.x, so for earlier code levels, we only have call home via email.
+   $_ = $code_level;
+   print "   code level is $_ \n" if ($verbose eq "yes");
+   s/\.//g;             #get rid of decimals (ie change 8.4.0.2 to 8402
+   print "   code level without the decimal places is $_ \n" if ($verbose eq "yes");
+   #
+   if ( $_ >= 8000 ) {                                          						#only proceed if SVC code level is 8000 or higher
+      foreach $key (sort keys %clusters) {
+         if ( ($clusters{$key}{email_state} eq "stopped") && ($cloudcallhome{status} ne "enabled") ) {		#see if both email and cloud call home are not running
+            $error_count++;											#increment the total number of problems found
+            $error_text = "$error_text , WARN - both email and cloud call-home functionality are off, so this system will not report hardware failures to IBM Support. Please enable at least one call-home method.  ";
+            print "   email_call_home:$clusters{$key}{email_state} cloud_call_home:$cloudcallhome{status} \n" if ($verbose eq "yes");
+         }													#end of if block
+      }														#end of foreach loop
+   }														#end of if block
+}                                                                               				#end of subroutine
 
 
 
@@ -1400,9 +1513,11 @@ sub check_for_degraded_hosts {
          $hosts{$1}{port_count}  = $3; 					#assign value to hash
          $hosts{$1}{iogrp_count} = $4; 					#assign value to hash
          $hosts{$1}{status}      = $5; 					#assign value to hash
-         print "      id:$hosts{$1}{id} name:$hosts{$1}{name} status:$hosts{$1}{status} \n" if ($verbose eq "yes");
-         $error_count++ if ($hosts{$1}{status} eq "degraded"); 		#increment the total number of problems found
-         $error_text = "$error_text , WARN - degraded host $hosts{$1}{name}.";
+         print "      id:$hosts{$1}{id} status:$hosts{$1}{status} port_count:$hosts{$1}{port_count} name:$hosts{$1}{name} \n" if ($verbose eq "yes");
+         if ($hosts{$1}{status} eq "degraded") { 		
+            $error_count++; 						#increment the total number of problems found
+            $error_text = "$error_text , WARN - degraded host $hosts{$1}{name}.";
+         }								#end of if block 
       }									#end of if block 
    }	  								#end of while loop
    close SSH; 								#close filehandle
@@ -2223,7 +2338,7 @@ sub print_output {
    }                                                                    #end of foreach loop
    #
    # Much of the text of the output will be the same.  Put the common stuff in a variable so we can simplify the outputs
-   $common_output_data = "cluster_name:$cluster_name cpu_util:$cpu_pc\% config_node:$config_node node_count:$nodecount code_level:$code_level smtp:$smtp_ipaddr ntp:$ntp_ipaddr vdisks:$num_vdisks mdisks:$num_mdisks pdisks:$num_pdisks external_storage_systems:$num_external_controllers consistency_groups:$consistency_group_count metro_mirrors:$metro_mirror_count global_mirrors:$global_mirror_count vdisk_read_latency:${vdisk_r_ms}ms vdisk_write_latency:${vdisk_w_ms}ms hosts_active:$hosts_active hosts_degraded:$hosts_degraded ";
+   $common_output_data = "cluster_name:$cluster_name cpu_util:$cpu_pc\% config_node:$config_node node_count:$nodecount code_level:$code_level smtp:$smtp_ipaddr ntp:$ntp_ipaddr vdisks:$num_vdisks mdisks:$num_mdisks pdisks:$num_pdisks external_storage_systems:$num_external_controllers consistency_groups:$consistency_group_count metro_mirrors:$metro_mirror_count global_mirrors:$global_mirror_count vdisk_read_latency:${vdisk_r_ms}ms vdisk_write_latency:${vdisk_w_ms}ms hosts_active:$hosts_active hosts_degraded:$hosts_degraded"; 
    #
    # Add the storage pool utilization to the $common_output_data
    #
@@ -2240,6 +2355,13 @@ sub print_output {
       if ( $enclosures{$key}{type} eq "expansion" ) {
          $common_output_data = "$common_output_data expansion_enclosure_model_serial:$enclosures{$key}{product_MTM}:$enclosures{$key}{serial_number} ";
       }
+   }                                                                    #end of foreach loop
+   #
+   # Add the call-home settings (ie call home via cloud or call home via email) to the $common_output_data
+   #
+   $common_output_data = "$common_output_data callhome_via_cloud:$cloudcallhome{status} ";
+   foreach $key (sort keys %clusters) {
+      $common_output_data = "$common_output_data callhome_via_email:$clusters{$key}{email_state} ";
    }                                                                    #end of foreach loop
    #
    # Check for problems
@@ -2298,6 +2420,8 @@ verify_credentials;							#confirm SSH key pairs allow login to storage system
 check_cluster_status; 							#check NTP settings, email notifications
 check_node_status;							#confirm all the storage controller nodes are online
 check_email_server;							#confirm the SMTP server used for email alerts responds to ping
+check_cloudcallhome;							#confirm the storage system will call home to IBM support via cloud service
+check_all_call_home_settings; 						#confirm that at least one call home method is enabled (cloud or email)
 check_ntp_server;							#confirm the NTP  server used for time sync    responds to ping
 check_controllers;							#check any external disk subsystems
 check_mdiskgrps;							#confirm all mdisk groups are online
